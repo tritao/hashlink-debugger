@@ -1,3 +1,6 @@
+## 2.0.0 (September 1, 2026)
+* added support to hashlink 2, bytecode v6
+
 ## 1.4.34 (December 12, 2025)
 
 * fixed noDebug option still attach debugger
