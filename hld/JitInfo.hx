@@ -14,6 +14,8 @@ class JitInfo {
 	public var align(default,null) : Align;
 	public var hasThreads(get,never) : Bool;
 	public var pid(default,null) : Int = 0;
+	public var protocolVersion(default,null) : Int = 0;
+	public var moduleRevision(default,null) : Int = 0;
 
 	var flags : haxe.EnumFlags<DebugFlag>;
 	var input : haxe.io.Input;
@@ -65,7 +67,8 @@ class JitInfo {
 		if( input.readString(3) != "HLD" )
 			return false;
 		var version = input.readByte() - "0".code;
-		if( version <= 0 || version > 2 )
+		protocolVersion = version;
+		if( version <= 0 || version > 3 )
 			return false;
 		flags = haxe.EnumFlags.ofInt(input.readInt32());
 		is64 = flags.has(Is64);
@@ -107,8 +110,44 @@ class JitInfo {
 
 			if( !readModule() )
 				return false;
+			if( version == 3 && !readPatchMappings() )
+				return false;
 		}
 
+		return true;
+	}
+
+	function readPatchMappings() {
+		readPointer(); // stable hl_module identity
+		var bytecodeSize = input.readInt32();
+		if( bytecodeSize < 0 ) return false;
+		input.read(bytecodeSize); // launch module is already loaded by the adapter
+		moduleRevision = input.readInt32();
+		var regionCount = input.readInt32();
+		if( moduleRevision < 1 || regionCount < 0 ) return false;
+		for( _ in 0...regionCount ) {
+			var regionStart = readPointer();
+			var regionSize = input.readInt32();
+			var retired = input.readByte() != 0;
+			var functionCount = input.readInt32();
+			if( regionSize <= 0 || functionCount <= 0 ) return false;
+			for( _ in 0...functionCount ) {
+				var functionIndex = input.readInt32();
+				if( functionIndex < 0 || functionIndex >= module.code.functions.length ) return false;
+				var fn = module.code.functions[functionIndex];
+				var nops = input.readInt32();
+				var start = regionStart.offset(input.readInt32());
+				var varsSize = input.readInt32();
+				var large = input.readByte() != 0;
+				if( nops != fn.debug.length >> 1 || varsSize < 0 ) return false;
+				var offsets = input.read((nops + 1) * (large ? 4 : 2));
+				var vars = input.read(varsSize);
+				if( !retired ) {
+					functions[functionIndex] = {start: start, large: large, offsets: offsets, vars: vars};
+					functionByCodePos.set(start.i64,functionIndex);
+				}
+			}
+		}
 		return true;
 	}
 
