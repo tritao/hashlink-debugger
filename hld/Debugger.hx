@@ -81,6 +81,8 @@ class Debugger {
 	var processExit : Bool;
 	var debugProtocolStarted = false;
 	var mappingRequestPending = false;
+	var revisionNotificationPending = false;
+	var pendingRebinds : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module }>;
 	var ignoredRoots : Map<String,Bool>;
 
 	var breakPoints : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module }>;
@@ -157,6 +159,7 @@ class Debugger {
 	}
 
 	public function connect( host : String, port : Int, onResult : Bool -> Void ) {
+		var initialResultPending = false;
 		function done(input:haxe.io.BytesInput) {
 			jit = new JitInfo();
 			if( !jit.read(input, module) ) {
@@ -165,7 +168,13 @@ class Debugger {
 				return;
 			}
 			module.init(jit.align);
-			onResult(true);
+			if( jit.protocolVersion == 3 ) {
+				DebugTrace.write("debugger", "hld3_connected", { modules : 1 + jit.debugModules.length });
+				debugProtocolStarted = true;
+				initialResultPending = true;
+				#if hxnodejs sock.write("A") #else sock.output.writeByte("A".code) #end;
+			} else
+				onResult(true);
 		}
 
 		#if hxnodejs
@@ -184,13 +193,39 @@ class Debugger {
 				if( !connected ) {
 					done(input);
 					connected = true;
-				} else if( !jit.readRefresh(input) ) {
-					close();
-					return;
 				} else {
-					mappingRequestPending = false;
-					rebindBreakpoints();
-					if( onDebugMappingsChanged != null ) onDebugMappingsChanged();
+					var marker = input.readString(4);
+					if( marker == "REV3" ) {
+						var identityLow = input.readInt32();
+						var identityHigh = jit.is64 ? input.readInt32() : 0;
+						var revision = input.readInt32();
+						if( revision <= 0 ) throw "Invalid REV3 revision";
+						DebugTrace.write("debugger", "rev3_received", { moduleLow : identityLow, moduleHigh : identityHigh, revision : revision });
+						revisionNotificationPending = true;
+						requestDebugMappings();
+					} else if( marker == "MAP3" ) {
+						if( !jit.readRefresh(input, false) ) { close(); return; }
+						DebugTrace.write("debugger", "map3_applied", { modules : 1 + jit.debugModules.length, breakpoints : breakPoints.length });
+						mappingRequestPending = false;
+						if( revisionNotificationPending ) applyRevisionMappings() else rebindBreakpoints();
+						if( onDebugMappingsChanged != null ) onDebugMappingsChanged();
+						if( initialResultPending ) { initialResultPending = false; onResult(true); }
+					} else if( marker == "ACK3" ) {
+						DebugTrace.write("debugger", "ack3_received");
+						if( !initialResultPending ) throw "Unexpected ACK3";
+						initialResultPending = false;
+						onResult(true);
+					} else if( marker == "BRK3" ) {
+						var count = input.readInt32();
+						if( pendingRebinds == null || count != pendingRebinds.length ) throw "Invalid BRK3 response";
+						for( index in 0...count ) pendingRebinds[index].oldByte = input.readByte();
+						DebugTrace.write("debugger", "brk3_received", { count : count });
+						pendingRebinds = null;
+						finishRevisionMappings();
+					} else {
+						close();
+						return;
+					}
 				}
 				inputData = inputData.sub(input.position, inputData.length - input.position);
 				if( inputData.length > 0 ) consume();
@@ -257,6 +292,7 @@ class Debugger {
 	}
 
 	function close() {
+		DebugTrace.write("debugger", "socket_close");
 		if( sock != null ) {
 			#if hxnodejs sock.destroy() #else sock.close() #end;
 			sock = null;
@@ -264,13 +300,16 @@ class Debugger {
 	}
 
 	public function run() {
+		DebugTrace.write("debugger", "run_enter", { stoppedThread : stoppedThread });
 		afterStep = false;
 		// closing the socket will unlock waiting thread
 		if( jit.protocolVersion != 3 )
 			close();
 		else if( !debugProtocolStarted ) {
 			debugProtocolStarted = true;
-			requestDebugMappings();
+			// A starts an HLD3 target without taking a redundant live snapshot.
+			// Later snapshots are revision-driven and publication-synchronized.
+			#if hxnodejs sock.write("A") #else sock.output.writeByte("A".code) #end;
 		}
 		if( stoppedThread != null )
 			resume();
@@ -280,7 +319,43 @@ class Debugger {
 	public function requestDebugMappings() {
 		if( jit == null || jit.protocolVersion != 3 || sock == null || mappingRequestPending ) return;
 		mappingRequestPending = true;
+		DebugTrace.write("debugger", "map3_requested");
 		#if hxnodejs sock.write("R") #else sock.output.writeByte("R".code) #end;
+	}
+
+	function applyRevisionMappings() {
+		pendingRebinds = [];
+		for( bp in breakPoints ) {
+			if( bp.fid < 0 ) continue;
+			var owner = bp.jit == null ? jit : bp.jit;
+			var current = owner.moduleIdentity == null ? owner : findJitModule(owner.moduleIdentity);
+			if( current == null || !current.hasFunction(bp.fid) ) continue;
+			var next = current.getCodePos(bp.fid, bp.pos);
+			if( next == bp.codePos ) continue;
+			bp.jit = current;
+			bp.module = current.module;
+			bp.codePos = next;
+			pendingRebinds.push(bp);
+		}
+		if( pendingRebinds.length == 0 ) { pendingRebinds = null; finishRevisionMappings(); return; }
+		DebugTrace.write("debugger", "breakpoints_rebind_requested", { count : pendingRebinds.length });
+		var output = new haxe.io.BytesOutput();
+		output.bigEndian = false;
+		output.writeByte("B".code);
+		output.writeInt32(pendingRebinds.length);
+		for( bp in pendingRebinds ) {
+			output.writeInt32(bp.codePos.i64.low);
+			if( jit.is64 ) output.writeInt32(bp.codePos.i64.high);
+			output.writeByte(INT3);
+		}
+		var bytes = output.getBytes();
+		#if hxnodejs sock.write(js.node.Buffer.from(bytes.getData())) #else sock.output.write(bytes) #end;
+	}
+
+	function finishRevisionMappings() {
+		revisionNotificationPending = false;
+		DebugTrace.write("debugger", "revision_acknowledged");
+		#if hxnodejs sock.write("A") #else sock.output.writeByte("A".code) #end;
 	}
 
 	function rebindBreakpoints() {
@@ -458,6 +533,7 @@ class Debugger {
 		watchBreak = null;
 		while( true ) {
 			cmd = api.wait(customTimeout == null ? 1000 : Math.ceil(customTimeout * 1000));
+			if( cmd.r != Timeout && cmd.r != Handled ) DebugTrace.write("debugger", "native_wait", { result : Std.string(cmd.r), thread : cmd.tid });
 
 			if( cmd.r == Breakpoint && !onEvalCall && (jit.isCodePtr(nextStep) || onSingleStep) ) {
 				// On Linux, singlestep is not reset
@@ -488,6 +564,7 @@ class Debugger {
 
 			case Breakpoint:
 				var codePos = getCodePos(tid).offset(-1);
+				DebugTrace.write("debugger", "trap_received", { thread : tid, address : codePos.toString(), known : Lambda.exists(breakPoints, function(b) return b.codePos == codePos) });
 				for( b in breakPoints ) {
 					if( b.codePos == codePos ) {
 						condition = b.condition;
@@ -1228,7 +1305,12 @@ class Debugger {
 			throw "Assert invalid ptr " + ptr;
 		if( DEBUG ) trace('Set ${jit.codePtrToString(ptr)}=$byte');
 		api.writeByte(ptr, 0, byte);
-		api.flush(ptr, 1);
+		if( !api.flush(ptr, 1) )
+			throw "Failed to flush code @" + ptr.toString();
+		var actual = api.readByte(ptr, 0);
+		if( actual != (byte & 0xFF) )
+			throw 'Failed to verify code write @${ptr.toString()}: expected ${byte & 0xFF}, got $actual';
+		DebugTrace.write("debugger", "code_write", { address : ptr.toString(), value : byte & 0xFF, verified : actual });
 	}
 
 	function getReg(tid, reg) {
@@ -1250,6 +1332,7 @@ class Debugger {
 
 	public function addBreakpoint( file : String, line : Int, condition : Null<String> ) {
 		var resolvedLine = -1;
+		var installed = false;
 		for( owner in allJitModules() ) {
 			var breaks = owner.module.getBreaks(file, line);
 			if( breaks == null ) continue;
@@ -1263,14 +1346,16 @@ class Debugger {
 						break;
 					}
 				}
-				if( found ) continue;
+				if( found ) { installed = true; continue; }
 				var codePos = owner.getCodePos(b.ifun, b.pos);
 				var old = getAsm(codePos);
 				setAsm(codePos, INT3);
 				breakPoints.push({ fid : b.ifun, pos : b.pos, oldByte : old, codePos : codePos, condition : condition, jit : owner, module : owner.module });
+				DebugTrace.write("debugger", "breakpoint_installed", { file : file, line : breaks.line, functionId : b.ifun, opcode : b.pos, address : codePos.toString(), oldByte : old });
+				installed = true;
 			}
 		}
-		return resolvedLine;
+		return installed ? resolvedLine : -1;
 	}
 
 	function allJitModules():Array<JitInfo> return [jit].concat(jit.debugModules);

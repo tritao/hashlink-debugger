@@ -64,6 +64,7 @@ class HLAdapter extends DebugSession {
 		inst = this;
 		shouldRun = false;
 		procExited = false;
+		hld.DebugTrace.write("adapter", "created", { pid : js.Node.process.pid });
 	}
 
 	function set_isSessionActive( b : Bool ) {
@@ -318,7 +319,8 @@ class HLAdapter extends DebugSession {
 		proc.stderr.on('data', function(buf){
 			sendEvent(new OutputEvent(buf.toString(), OutputEventCategory.Stderr));
 		} );
-		proc.on('close', function(code) {
+		proc.on('close', function(code, signal) {
+			hld.DebugTrace.write("adapter", "target_close", { code : code, signal : signal });
 			procExited = true;
 			var exitedEvent:ExitedEvent = {type:MessageType.Event, event:"exited", seq:0, body : { exitCode:code}};
 			debug("Exit code " + code);
@@ -334,6 +336,7 @@ class HLAdapter extends DebugSession {
 			}
 		});
 		proc.on('error', function(err) {
+			hld.DebugTrace.write("adapter", "target_error", { message : err.message });
 			procExited = true;
 			if( err.message == "spawn hl ENOENT" )
 				errorMessageAndResponse(cast response, "Could not start 'hl' process, executable was not found in PATH.\nRestart VSCode or computer.");
@@ -448,6 +451,7 @@ class HLAdapter extends DebugSession {
 		var count = 0;
 		while( true ) {
 			var msg = dbg.run();
+			hld.DebugTrace.write("adapter", "wait_result", { result : Std.string(msg) });
 			handleWait(msg);
 			switch( msg ) {
 			case Timeout:
@@ -1300,8 +1304,9 @@ class HLAdapter extends DebugSession {
 					paramError("Unsupported parameter " + param);
 			}
 		}
-		if( HLAdapter.DEBUG ) {
+		if( HLAdapter.DEBUG || hld.DebugTrace.enabled() ) {
 			js.Node.process.on("uncaughtException", function(e:js.lib.Error) {
+				hld.DebugTrace.write("adapter", "uncaught_exception", { message : e.message, stack : e.stack });
 				if( inst != null ) inst.sendEvent(new OutputEvent("*** ERROR *** " +e.message+"\n"+e.stack, Stderr));
 				Sys.exit(1);
 			});

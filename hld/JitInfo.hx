@@ -161,9 +161,9 @@ class JitInfo {
 
 	/** Read a complete MAP3 frame. Parsing happens into temporary module mappings so
 		an incomplete socket chunk never mutates the live address tables. */
-	public function readRefresh( input : haxe.io.Input ) : Bool {
+	public function readRefresh( input : haxe.io.Input, readHeader = true ) : Bool {
 		this.input = input;
-		if( input.readString(4) != "MAP3" ) return false;
+		if( readHeader && input.readString(4) != "MAP3" ) return false;
 		var count = input.readInt32();
 		if( count <= 0 ) return false;
 		var parsed = [];
