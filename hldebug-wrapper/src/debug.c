@@ -190,6 +190,11 @@ static void *get_reg( int r ) {
 		struct user_regs_struct *regs = NULL;
 		struct user *user = NULL;
 		struct user_fpregs_struct *fp = NULL;
+		if( r >= 11 && (r & 1) != 0 ) {
+			int index = (r - 11) >> 1;
+			if( index < 0 || index >= 16 ) return NULL;
+			return (void*)(-((int_val)&fp->xmm_space[index * 4])-1);
+		}
 		switch( r ) {
 		case -1: return &user->u_fpstate;
 #		ifdef HL_64
@@ -197,18 +202,43 @@ static void *get_reg( int r ) {
 		case 1: return &regs->rbp;
 		case 2: return &regs->rip;
 		case 10: return &regs->rax;
-		case 11: return (void*)(-((int_val)&fp->xmm_space[0])-1);
+		case 12: return &regs->rcx;
+		case 14: return &regs->rdx;
+		case 16: return &regs->rbx;
+		case 18: return &regs->rsp;
+		case 20: return &regs->rbp;
+		case 22: return &regs->rsi;
+		case 24: return &regs->rdi;
+		case 26: return &regs->r8;
+		case 28: return &regs->r9;
+		case 30: return &regs->r10;
+		case 32: return &regs->r11;
+		case 34: return &regs->r12;
+		case 36: return &regs->r13;
+		case 38: return &regs->r14;
+		case 40: return &regs->r15;
 #		else
 		case 0: return &regs->esp;
 		case 1: return &regs->ebp;
 		case 2: return &regs->eip;
 		case 10: return &regs->eax;
-		case 11: return (void*)-1;
+		case 12: return &regs->ecx;
+		case 14: return &regs->edx;
+		case 16: return &regs->ebx;
+		case 18: return &regs->esp;
+		case 20: return &regs->ebp;
+		case 22: return &regs->esi;
+		case 24: return &regs->edi;
 #		endif
 		case 3: return &regs->eflags;
-		default: return &user->u_debugreg[r-4];
+		case 4: return &user->u_debugreg[0];
+		case 5: return &user->u_debugreg[1];
+		case 6: return &user->u_debugreg[2];
+		case 7: return &user->u_debugreg[3];
+		case 8: return &user->u_debugreg[6];
+		case 9: return &user->u_debugreg[7];
+		default: return NULL;
 		}
-		return NULL;
 }
 #endif
 
@@ -333,6 +363,7 @@ HL_API void *hl_debug_read_register( int pid, int thread, int reg, bool is64 ) {
 	return mdbg_read_register(pid, thread, get_reg(reg), is64);
 #	elif defined(USE_PTRACE)
 	void *r = get_reg(reg);
+	if( r == NULL ) return NULL;
 	if( ((int_val)r) < 0 ) {
 		// peek FP ptr
 		char *addr = (char*)ptrace(PTRACE_PEEKUSER,thread,get_reg(-1),0);
@@ -364,7 +395,8 @@ HL_API bool hl_debug_write_register( int pid, int thread, int reg, void *value, 
 #	elif defined(MAC_DEBUG)
 	return mdbg_write_register(pid, thread, get_reg(reg), value, is64);
 #	elif defined(USE_PTRACE)
-	return ptrace(PTRACE_POKEUSER,thread,get_reg(reg),value) >= 0;
+	void *r = get_reg(reg);
+	return r != NULL && ((int_val)r) >= 0 && ptrace(PTRACE_POKEUSER,thread,r,value) >= 0;
 #	else
 	return false;
 #	endif
@@ -380,4 +412,3 @@ DEFINE_PRIM(_I32, debug_wait, _I32 _REF(_I32) _I32);
 DEFINE_PRIM(_BOOL, debug_resume, _I32 _I32);
 DEFINE_PRIM(_BYTES, debug_read_register, _I32 _I32 _I32 _BOOL);
 DEFINE_PRIM(_BOOL, debug_write_register, _I32 _I32 _I32 _BYTES _BOOL);
-
