@@ -31,6 +31,8 @@ class StackRawInfo {
 	var fpos : Int;
 	var codePos : Pointer;
 	var ebp : Null<hld.Pointer>;
+	@:optional var jit : JitInfo;
+	@:optional var module : Module;
 }
 
 @:publicFields @:structInit
@@ -77,9 +79,11 @@ class Debugger {
 	var module : Module;
 	var jit : JitInfo;
 	var processExit : Bool;
+	var debugProtocolStarted = false;
+	var mappingRequestPending = false;
 	var ignoredRoots : Map<String,Bool>;
 
-	var breakPoints : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String }>;
+	var breakPoints : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module }>;
 	var nextStep(default,set): Pointer = Pointer.make(0,0);
 	var currentStack : Array<StackRawInfo>;
 	var watches : Array<WatchPoint>;
@@ -89,6 +93,7 @@ class Debugger {
 	public var is64(get, never) : Bool;
 
 	public var eval : Eval;
+	var evalByModule : haxe.ds.ObjectMap<Module,Eval>;
 	public var currentStackFrame : Int;
 	public var breakOnThrow(default, set) : Bool;
 	public var stackFrameCount(get, never) : Int;
@@ -97,6 +102,7 @@ class Debugger {
 	public var currentThread(default,set) : Null<Int>;
 
 	public var customTimeout : Null<Float>;
+	public var onDebugMappingsChanged : Void -> Void;
 
 	public var watchBreak : Address; // set if breakpoint occur on watch expression
 
@@ -151,7 +157,7 @@ class Debugger {
 	}
 
 	public function connect( host : String, port : Int, onResult : Bool -> Void ) {
-		function done(input) {
+		function done(input:haxe.io.BytesInput) {
 			jit = new JitInfo();
 			if( !jit.read(input, module) ) {
 				close();
@@ -163,15 +169,39 @@ class Debugger {
 		}
 
 		#if hxnodejs
-		var inputData = new haxe.io.BytesBuffer();
+		var inputData = haxe.io.Bytes.alloc(0);
+		var connected = false;
+		function appendData(buf:js.node.Buffer) {
+			var chunk = haxe.io.Bytes.ofData(buf.buffer).sub(buf.byteOffset, buf.byteLength);
+			var merged = haxe.io.Bytes.alloc(inputData.length + chunk.length);
+			merged.blit(0, inputData, 0, inputData.length);
+			merged.blit(inputData.length, chunk, 0, chunk.length);
+			inputData = merged;
+		}
+		function consume() {
+			var input = new haxe.io.BytesInput(inputData);
+			try {
+				if( !connected ) {
+					done(input);
+					connected = true;
+				} else if( !jit.readRefresh(input) ) {
+					close();
+					return;
+				} else {
+					mappingRequestPending = false;
+					rebindBreakpoints();
+					if( onDebugMappingsChanged != null ) onDebugMappingsChanged();
+				}
+				inputData = inputData.sub(input.position, inputData.length - input.position);
+				if( inputData.length > 0 ) consume();
+			} catch( e : haxe.io.Eof ) {
+				// Keep the complete frame until another socket chunk arrives.
+			}
+		}
 		sock = new js.node.net.Socket();
 		sock.on("data", function(buf:js.node.Buffer) {
-			inputData.add(haxe.io.Bytes.ofData(buf.buffer));
-			try {
-				done(new haxe.io.BytesInput(inputData.getBytes()));
-			} catch( e : haxe.io.Eof ) {
-				// wait for more data
-			}
+			appendData(buf);
+			consume();
 		});
 		js.node.Dns.lookup(host, {family: 4}, function(err, address:String, family) {
 			if( err != null ) {
@@ -205,13 +235,20 @@ class Debugger {
 
 	public function init( api : Api ) {
 		this.api = api;
-		eval = new Eval(module, api, jit);
-		eval.resumeDebug = evalResumeDebug;
-		eval.setSingleStep = singleStep;
+		evalByModule = new haxe.ds.ObjectMap();
+		eval = makeEval(module, jit);
 		if( !api.start() )
 			return false;
 		wait(); // wait first break
 		return true;
+	}
+
+	function makeEval(ownerModule:Module, ownerJit:JitInfo) {
+		var out = new Eval(ownerModule, api, ownerJit);
+		out.resumeDebug = evalResumeDebug;
+		out.setSingleStep = singleStep;
+		evalByModule.set(ownerModule, out);
+		return out;
 	}
 
 	function evalResumeDebug() {
@@ -229,10 +266,44 @@ class Debugger {
 	public function run() {
 		afterStep = false;
 		// closing the socket will unlock waiting thread
-		close();
+		if( jit.protocolVersion != 3 )
+			close();
+		else if( !debugProtocolStarted ) {
+			debugProtocolStarted = true;
+			requestDebugMappings();
+		}
 		if( stoppedThread != null )
 			resume();
 		return wait();
+	}
+
+	public function requestDebugMappings() {
+		if( jit == null || jit.protocolVersion != 3 || sock == null || mappingRequestPending ) return;
+		mappingRequestPending = true;
+		#if hxnodejs sock.write("R") #else sock.output.writeByte("R".code) #end;
+	}
+
+	function rebindBreakpoints() {
+		for( bp in breakPoints ) {
+			if( bp.fid < 0 ) continue;
+			var owner = bp.jit == null ? jit : bp.jit;
+			var current = owner.moduleIdentity == null ? owner : findJitModule(owner.moduleIdentity);
+			if( current == null || current.getFunctionVars(bp.fid) == null ) continue;
+			var next = current.getCodePos(bp.fid, bp.pos);
+			if( next == bp.codePos ) continue;
+			// Old regions may already have been retired; only install the new trap.
+			bp.jit = current;
+			bp.module = current.module;
+			bp.codePos = next;
+			bp.oldByte = getAsm(next);
+			setAsm(next, INT3);
+		}
+	}
+
+	function findJitModule(identity:Pointer):JitInfo {
+		if( jit.moduleIdentity == identity ) return jit;
+		for( item in jit.debugModules ) if( item.moduleIdentity == identity ) return item;
+		return null;
 	}
 
 	public function getThreads() {
@@ -577,7 +648,7 @@ class Debugger {
 			if( e != null )
 				stack.push(e);
 		}
-		return [for( s in stack ) if( module.isValid(s.fidx, s.fpos) ) s];
+		return [for( s in stack ) if( isValidRaw(s) ) s];
 	}
 
 	function prepareStack( isWatchbreak=false ) {
@@ -817,7 +888,7 @@ class Debugger {
 
 		//trace(eip,"0x"+api.readByte(eip, 0), e);
 
-		if( e != null && !module.isValid(e.fidx,e.fpos) )
+		if( e != null && !isValidRaw(e) )
 			e = null;
 
 		// if we are on ret, our EBP is wrong, so let's ignore this stack part
@@ -836,7 +907,8 @@ class Debugger {
 				e = null;
 			} else if( e.fpos < 0 ) {
 				// we are in function prolog
-				var delta = jit.getFunctionPos(e.fidx).sub(asmPos);
+				var ownerJit = e.jit == null ? jit : e.jit;
+				var delta = ownerJit.getFunctionPos(e.fidx).sub(asmPos);
 				e.fpos = 0;
 				if( delta == 0 )
 					e.ebp = esp.offset(-jit.align.ptr); // not yet pushed ebp
@@ -865,7 +937,7 @@ class Debugger {
 			if( ret == null )
 				return true;
 			var e = jit.resolveAsmPos(ret);
-			return e == null || !module.isValid(e.fidx, e.fpos);
+			return e == null || !isValidRaw(e);
 		}
 
 		// similar to module/module_capture_stack
@@ -882,7 +954,7 @@ class Debugger {
 					var callSite = readStack(slot.offset(trampoline.callOffset));
 					if( frameEbp != null && callSite != null && frameEbp > esp && frameEbp < tinf.stackTop ) {
 						var e = jit.resolveAsmPos(callSite.offset(-1));
-						if( e != null && e.fpos >= 0 && module.isValid(e.fidx, e.fpos) ) {
+						if( e != null && e.fpos >= 0 && isValidRaw(e) ) {
 							e.ebp = frameEbp;
 							stack.push({ fidx : Eval.TRAMPOLINE_FIDX, fpos : 0, codePos : val, ebp : slot });
 							stack.push(e);
@@ -959,7 +1031,7 @@ class Debugger {
 			}
 		}
 
-		return [for( s in stack ) if( s.fidx == Eval.TRAMPOLINE_FIDX || module.isValid(s.fidx,s.fpos) ) s];
+		return [for( s in stack ) if( s.fidx == Eval.TRAMPOLINE_FIDX || isValidRaw(s) ) s];
 	}
 
 	inline function get_stackFrameCount() return currentStack.length;
@@ -981,8 +1053,11 @@ class Debugger {
 		var out = [];
 		for( ptr in stack ) {
 			var e = jit.resolveAsmPos(ptr);
-			if( e == null || !module.isValid(e.fidx,e.fpos) || e.fpos < 0 ) continue;
-			out.push(stackInfo({ fidx : e.fidx, fpos : e.fpos, ebp: null }));
+			if( e == null || e.fpos < 0 ) continue;
+			var owner = e.module == null ? module : e.module;
+			if( !owner.isValid(e.fidx,e.fpos) ) continue;
+			e.ebp = null;
+			out.push(stackInfo(e));
 		}
 		return out;
 	}
@@ -990,16 +1065,23 @@ class Debugger {
 	function stackInfo( f ) : StackInfo {
 		if( f.fidx == Eval.TRAMPOLINE_FIDX )
 			return { file : "<native>", line : 0, ebp : f.ebp, context : null };
-		var s = module.resolveSymbol(f.fidx, f.fpos);
-		return { file : s.file, line : s.line, ebp : f.ebp, context : module.getMethodContext(f.fidx) };
+		var owner : Module = f.module == null ? module : f.module;
+		var s = owner.resolveSymbol(f.fidx, f.fpos);
+		return { file : s.file, line : s.line, ebp : f.ebp, context : owner.getMethodContext(f.fidx) };
 	}
 
 	function setContext(global:Bool) {
 		var cur = currentStack[currentStackFrame];
 		if( cur == null || cur.fidx == Eval.TRAMPOLINE_FIDX ) return false;
+		var ownerModule = cur.module == null ? module : cur.module;
+		var ownerJit = cur.jit == null ? jit : cur.jit;
+		var ownerEval = evalByModule.get(ownerModule);
+		if( ownerEval == null ) ownerEval = makeEval(ownerModule, ownerJit);
+		eval = ownerEval;
+		eval.currentThread = currentThread;
 		eval.globalContext = global;
 		var children = [for( i in 0...currentStackFrame ) currentStack[currentStackFrame - 1 - i]];
-		eval.setContext(cur.fidx, cur.fpos, jit.getNativeCodePos(cur.codePos), cur.ebp, children);
+		eval.setContext(cur.fidx, cur.fpos, ownerJit.getNativeCodePos(cur.codePos), cur.ebp, children);
 		return true;
 	}
 
@@ -1159,45 +1241,52 @@ class Debugger {
 	}
 
 	public function checkBreakpointLine(file : String, line : Int) {
-		var breaks = module.getBreaks(file, line);
-		return breaks == null ? -1 : breaks.line;
+		for( owner in allJitModules() ) {
+			var breaks = owner.module.getBreaks(file, line);
+			if( breaks != null ) return breaks.line;
+		}
+		return -1;
 	}
 
 	public function addBreakpoint( file : String, line : Int, condition : Null<String> ) {
-		var breaks = module.getBreaks(file, line);
-		if( breaks == null )
-			return -1;
-		// check already defined
-		var set = false;
-		for( b in breaks.breaks ) {
-			var found = false;
-			for( a in breakPoints ) {
-				if( a.fid == b.ifun && a.pos == b.pos ) {
-					found = true;
-					break;
+		var resolvedLine = -1;
+		for( owner in allJitModules() ) {
+			var breaks = owner.module.getBreaks(file, line);
+			if( breaks == null ) continue;
+			resolvedLine = breaks.line;
+			for( b in breaks.breaks ) {
+				if( !owner.hasFunction(b.ifun) ) continue;
+				var found = false;
+				for( a in breakPoints ) {
+					if( a.jit == owner && a.fid == b.ifun && a.pos == b.pos ) {
+						found = true;
+						break;
+					}
 				}
+				if( found ) continue;
+				var codePos = owner.getCodePos(b.ifun, b.pos);
+				var old = getAsm(codePos);
+				setAsm(codePos, INT3);
+				breakPoints.push({ fid : b.ifun, pos : b.pos, oldByte : old, codePos : codePos, condition : condition, jit : owner, module : owner.module });
 			}
-			if( found ) continue;
-
-			var codePos = jit.getCodePos(b.ifun, b.pos);
-			var old = getAsm(codePos);
-			setAsm(codePos, INT3);
-			breakPoints.push({ fid : b.ifun, pos : b.pos, oldByte : old, codePos : codePos, condition : condition });
-			set = true;
 		}
-		return breaks.line;
+		return resolvedLine;
+	}
+
+	function allJitModules():Array<JitInfo> return [jit].concat(jit.debugModules);
+	inline function isValidRaw(s:StackRawInfo) {
+		var owner = s.module == null ? module : s.module;
+		return owner.isValid(s.fidx, s.fpos);
 	}
 
 	public function clearBreakpoints( file : String ) {
-		var ffuns = module.getFileFunctions(file);
-		if( ffuns == null )
-			return;
-		for( b in breakPoints.copy() )
-			for( f in ffuns.functions )
-				if( b.fid == f.ifun ) {
-					removeBP(b);
-					break;
-				}
+		for( owner in allJitModules() ) {
+			var ffuns = owner.module.getFileFunctions(file);
+			if( ffuns == null ) continue;
+			for( b in breakPoints.copy() )
+				for( f in ffuns.functions )
+					if( b.jit == owner && b.fid == f.ifun ) { removeBP(b); break; }
+		}
 	}
 
 	function removeBP( bp ) {
@@ -1210,17 +1299,13 @@ class Debugger {
 	}
 
 	public function removeBreakpoint( file : String, line : Int ) {
-		var breaks = module.getBreaks(file, line);
-		if( breaks == null )
-			return false;
 		var rem = false;
-		for( b in breaks.breaks )
-			for( a in breakPoints )
-				if( a.fid == b.ifun && a.pos == b.pos ) {
-					rem = true;
-					removeBP(a);
-					break;
-				}
+		for( owner in allJitModules() ) {
+			var breaks = owner.module.getBreaks(file, line);
+			if( breaks == null ) continue;
+			for( b in breaks.breaks ) for( a in breakPoints.copy())
+				if( a.jit == owner && a.fid == b.ifun && a.pos == b.pos ) { rem = true; removeBP(a); break; }
+		}
 		return rem;
 	}
 

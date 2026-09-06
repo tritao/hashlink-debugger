@@ -16,6 +16,8 @@ class JitInfo {
 	public var pid(default,null) : Int = 0;
 	public var protocolVersion(default,null) : Int = 0;
 	public var moduleRevision(default,null) : Int = 0;
+	public var moduleIdentity(default,null) : Pointer;
+	public var debugModules(default,null) : Array<JitInfo> = [];
 
 	var flags : haxe.EnumFlags<DebugFlag>;
 	var input : haxe.io.Input;
@@ -34,8 +36,10 @@ class JitInfo {
 	var allTypes : Pointer;
 
 	var functions : Array<{ start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
+	var baseFunctions : Array<{ start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
 	var functionByCodePos : Int64Map<Int>;
-	var module : Module;
+	public var module(default,null) : Module;
+	var codeRanges : Array<{ start : Pointer, end : Pointer }> = [];
 
 	public function new() {
 	}
@@ -118,11 +122,14 @@ class JitInfo {
 	}
 
 	function readPatchMappings() {
-		readPointer(); // stable hl_module identity
+		moduleIdentity = readPointer();
 		var bytecodeSize = input.readInt32();
 		if( bytecodeSize < 0 ) return false;
 		input.read(bytecodeSize); // launch module is already loaded by the adapter
 		moduleRevision = input.readInt32();
+		globals = readPointer();
+		allTypes = readPointer();
+		if( !readRefreshBase(module, null) ) return false;
 		var regionCount = input.readInt32();
 		if( moduleRevision < 1 || regionCount < 0 ) return false;
 		for( _ in 0...regionCount ) {
@@ -131,6 +138,7 @@ class JitInfo {
 			var retired = input.readByte() != 0;
 			var functionCount = input.readInt32();
 			if( regionSize <= 0 || functionCount <= 0 ) return false;
+			codeRanges.push({ start : regionStart, end : regionStart.offset(regionSize) });
 			for( _ in 0...functionCount ) {
 				var functionIndex = input.readInt32();
 				if( functionIndex < 0 || functionIndex >= module.code.functions.length ) return false;
@@ -149,6 +157,138 @@ class JitInfo {
 			}
 		}
 		return true;
+	}
+
+	/** Read a complete MAP3 frame. Parsing happens into temporary module mappings so
+		an incomplete socket chunk never mutates the live address tables. */
+	public function readRefresh( input : haxe.io.Input ) : Bool {
+		this.input = input;
+		if( input.readString(4) != "MAP3" ) return false;
+		var count = input.readInt32();
+		if( count <= 0 ) return false;
+		var parsed = [];
+		for( _ in 0...count ) {
+			var identity = readPointer();
+			var bytecodeSize = input.readInt32();
+			if( bytecodeSize < 0 ) return false;
+			var bytecode = input.read(bytecodeSize);
+			var revision = input.readInt32();
+			var moduleGlobals = readPointer();
+			var moduleTypes = readPointer();
+			if( revision < 1 ) return false;
+			var target = findModule(identity);
+			var targetModule = target == null ? null : target.module;
+			if( targetModule == null ) {
+				if( bytecodeSize == 0 ) return false;
+				targetModule = new Module();
+				targetModule.load(bytecode);
+				targetModule.init(align);
+			}
+			var next = cloneForModule(targetModule, identity, revision);
+			next.globals = moduleGlobals;
+			next.allTypes = moduleTypes;
+			if( !readRefreshBase(targetModule, next) ) return false;
+			var regionCount = input.readInt32();
+			if( regionCount < 0 ) return false;
+			for( _ in 0...regionCount ) {
+				var regionStart = readPointer();
+				var regionSize = input.readInt32();
+				var retired = input.readByte() != 0;
+				var functionCount = input.readInt32();
+				if( regionSize <= 0 || functionCount <= 0 ) return false;
+				next.codeRanges.push({ start : regionStart, end : regionStart.offset(regionSize) });
+				for( _ in 0...functionCount ) {
+					var functionIndex = input.readInt32();
+					if( functionIndex < 0 || functionIndex >= targetModule.code.functions.length ) return false;
+					var fn = targetModule.code.functions[functionIndex];
+					var nops = input.readInt32();
+					var start = regionStart.offset(input.readInt32());
+					var varsSize = input.readInt32();
+					var large = input.readByte() != 0;
+					if( nops != fn.debug.length >> 1 || varsSize < 0 ) return false;
+					var offsets = input.read((nops + 1) * (large ? 4 : 2));
+					var vars = input.read(varsSize);
+					if( !retired ) {
+						next.functions[functionIndex] = { start: start, large: large, offsets: offsets, vars: vars };
+						next.functionByCodePos.set(start.i64, functionIndex);
+					}
+				}
+			}
+			parsed.push(next);
+			if( next.codeRanges.length > 0 ) {
+				next.codeStart = next.codeRanges[0].start;
+				next.codeEnd = next.codeRanges[0].end;
+				for( range in next.codeRanges ) if( range.end > next.codeEnd ) next.codeEnd = range.end;
+			}
+		}
+		for( next in parsed ) replaceModule(next);
+		return true;
+	}
+
+	function readRefreshBase(targetModule:Module, target:Null<JitInfo>) {
+		var start = readPointer();
+		var size = input.readInt32();
+		var count = input.readInt32();
+		if( size <= 0 || count != targetModule.code.functions.length ) return false;
+		var parsed = [];
+		for( index in 0...count ) {
+			var fn = targetModule.code.functions[index];
+			var nops = input.readInt32();
+			var fnStart = start.offset(input.readInt32());
+			var varsSize = input.readInt32();
+			var large = input.readByte() != 0;
+			if( nops != fn.debug.length >> 1 || varsSize < 0 ) return false;
+			parsed.push({ start: fnStart, large: large, offsets: input.read((nops + 1) * (large ? 4 : 2)), vars: input.read(varsSize) });
+		}
+		if( target != null ) {
+			target.codeStart = start;
+			target.codeEnd = start.offset(size);
+			target.codeSize = size;
+			target.baseFunctions = parsed;
+			target.functions = parsed.copy();
+			target.functionByCodePos = new Int64Map();
+			for( index in 0...parsed.length ) target.functionByCodePos.set(parsed[index].start.i64, index);
+		}
+		return true;
+	}
+
+	function cloneForModule(module:Module, identity:Pointer, revision:Int) {
+		var out = new JitInfo();
+		out.flags = flags; out.is64 = is64; out.isWinCall = isWinCall; out.align = align;
+		out.pid = pid; out.protocolVersion = protocolVersion; out.hlVersion = hlVersion;
+		out.threads = threads; out.oldThreadInfos = oldThreadInfos; out.trampoline = trampoline;
+		out.module = module; out.moduleIdentity = identity; out.moduleRevision = revision;
+		var previous = findModule(identity);
+		out.baseFunctions = previous == null ? null : previous.baseFunctions;
+		out.functions = out.baseFunctions == null ? [] : out.baseFunctions.copy();
+		out.functionByCodePos = new Int64Map();
+		for( index in 0...out.functions.length ) {
+			var fn = out.functions[index];
+			if( fn != null ) out.functionByCodePos.set(fn.start.i64, index);
+		}
+		return out;
+	}
+
+	function findModule(identity:Pointer):JitInfo {
+		if( moduleIdentity != null && moduleIdentity == identity ) return this;
+		for( item in debugModules ) if( item.moduleIdentity == identity ) return item;
+		return null;
+	}
+
+	function replaceModule(next:JitInfo) {
+		if( moduleIdentity == next.moduleIdentity ) {
+			moduleRevision = next.moduleRevision;
+			functions = next.functions;
+			functionByCodePos = next.functionByCodePos;
+			codeRanges = next.codeRanges;
+			return;
+		}
+		for( i in 0...debugModules.length )
+			if( debugModules[i].moduleIdentity == next.moduleIdentity ) {
+				debugModules[i] = next;
+				return;
+			}
+		debugModules.push(next);
 	}
 
 	function readModule( skipHeader=false ) {
@@ -184,6 +324,7 @@ class JitInfo {
 		}
 
 		codeEnd = codeStart.offset(codeSize);
+		baseFunctions = functions.copy();
 		if( trampolinePos >= 0 )
 			trampoline = makeTrampoline(codeStart.offset(trampolinePos));
 		return true;
@@ -208,8 +349,11 @@ class JitInfo {
 	}
 
 	public function getFunctionVars( fidx : Int ) {
-		return functions[fidx].vars;
+		var fn = functions[fidx];
+		return fn == null ? null : fn.vars;
 	}
+
+	public inline function hasFunction( fidx:Int ) return functions[fidx] != null;
 
 	public function getFunctionPos( fidx : Int ) : Pointer {
 		return functions[fidx].start;
@@ -221,6 +365,9 @@ class JitInfo {
 	}
 
 	public function isCodePtr( codePtr : Pointer ) : Bool {
+		for( range in codeRanges ) if( codePtr >= range.start && codePtr <= range.end ) return true;
+		for( item in debugModules ) if( item.isCodePtr(codePtr) ) return true;
+		if( codeStart == null || codeEnd == null ) return false;
 		if( codePtr < codeStart || codePtr > codeEnd )
 			return false;
 		return true;
@@ -237,25 +384,26 @@ class JitInfo {
 	}
 
 	public function resolveAsmPos( codePtr : Pointer ) : Null<Debugger.StackRawInfo> {
+		for( item in debugModules ) {
+			var found = item.resolveAsmPos(codePtr);
+			if( found != null ) return found;
+		}
 		if( !isCodePtr(codePtr) )
 			return null;
-		var min = 0;
-		var max = functions.length;
-		while( min < max ) {
-			var mid = (min + max) >> 1;
-			var p = functions[mid];
-			if( p.start <= codePtr )
-				min = mid + 1;
-			else
-				max = mid;
+		var fidx = -1;
+		var best : Pointer = null;
+		for( index in 0...functions.length ) {
+			var candidate = functions[index];
+			if( candidate != null && candidate.start <= codePtr && (best == null || candidate.start > best) ) {
+				fidx = index;
+				best = candidate.start;
+			}
 		}
-		if( min == 0 )
-			return null;
-		var fidx = (min - 1);
+		if( fidx < 0 ) return null;
 		var dbg = functions[fidx];
 		var fdebug = module.code.functions[fidx];
-		min = 0;
-		max = fdebug.debug.length>>1;
+		var min = 0;
+		var max = fdebug.debug.length>>1;
 		var relPos = codePtr.sub(dbg.start);
 		while( min < max ) {
 			var mid = (min + max) >> 1;
@@ -265,7 +413,7 @@ class JitInfo {
 			else
 				max = mid;
 		}
-		return { fidx : fidx, fpos : min - 1, codePos : codePtr, ebp : null };
+		return { fidx : fidx, fpos : min - 1, codePos : codePtr, ebp : null, jit : this, module : module };
 	}
 
 	public function functionFromAddr( p : Pointer ) {
