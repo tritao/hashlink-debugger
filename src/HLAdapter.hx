@@ -380,6 +380,15 @@ class HLAdapter extends DebugSession {
 
 	function startDebug( program : String, port : Int, onError : String -> Void ) {
 		dbg = new hld.Debugger();
+		dbg.onDebugMappingsChanged = function() {
+			var hadWatches = watchedPtrs.length > 0;
+			for( watch in watchedPtrs )
+				dbg.unwatch(watch.addr);
+			watchedPtrs = [];
+			ptrValues = [];
+			if( hadWatches )
+				errorMessage("Data breakpoints were cleared after hot reload; resolve and set them again.");
+		};
 
 		Sys.sleep(0.01); // make sure the process is started
 
@@ -1199,9 +1208,17 @@ class HLAdapter extends DebugSession {
 	override function setDataBreakpointsRequest(response:SetDataBreakpointsResponse, args:SetDataBreakpointsArguments) {
 		//debug("SetDataBreakpoints request");
 		var current = watchedPtrs.copy();
+		var results:Array<vscode.debugProtocol.DebugProtocol.Breakpoint> = [];
 		for( a in args.breakpoints ) {
-			if( a.dataId == null ) continue;
+			if( a.dataId == null ) {
+				results.push({ verified : false, message : "Missing data breakpoint identifier" });
+				continue;
+			}
 			var ptr = ptrValues[(cast a.dataId:Int) - 1];
+			if( ptr == null ) {
+				results.push({ verified : false, message : "Data breakpoint identifier is no longer valid" });
+				continue;
+			}
 			for( w in current ) {
 				if( w.addr.ptr.i64 == ptr.ptr.i64 ) {
 					current.remove(w);
@@ -1209,13 +1226,18 @@ class HLAdapter extends DebugSession {
 					break;
 				}
 			}
-			if( ptr == null ) continue;
+			if( ptr == null ) {
+				results.push({ verified : true });
+				continue;
+			}
 			try {
 				var w = dbg.watch(ptr);
 				debug("WATCHING "+ptr.ptr.toString()+":"+dbg.eval.typeStr(ptr.t));
 				watchedPtrs.push(w);
+				results.push({ verified : true });
 			} catch( e : Dynamic ) {
 				errorMessage(""+e);
+				results.push({ verified : false, message : Std.string(e) });
 			}
 		}
 		for( w in current ) {
@@ -1223,6 +1245,7 @@ class HLAdapter extends DebugSession {
 			watchedPtrs.remove(w);
 			dbg.unwatch(w.addr);
 		}
+		response.body = { breakpoints : results };
 		sendResponse(response);
 	}
 
