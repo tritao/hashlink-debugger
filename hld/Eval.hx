@@ -1465,7 +1465,8 @@ class Eval {
 			case HObj(o2): o = o2;
 			default:
 			}
-			switch( o.name ) {
+			var objectName = o.name.charCodeAt(0) == '$'.code ? o.name.substr(1) : o.name;
+			switch( objectName ) {
 			case "String":
 				var bytes = readPointer(p.offset(align.ptr));
 				var length = readI32(p.offset(align.ptr * 2));

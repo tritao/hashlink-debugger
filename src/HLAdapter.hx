@@ -99,6 +99,7 @@ class HLAdapter extends DebugSession {
 		response.body.supportsStepBack = false;
 		response.body.supportsSetVariable = true;
 		response.body.supportsDataBreakpoints = true;
+		response.body.supportsExceptionInfoRequest = true;
 
 		response.body.exceptionBreakpointFilters = [
 			{ filter : "all", label : "Stop on all exceptions" },
@@ -157,6 +158,37 @@ class HLAdapter extends DebugSession {
 			dbg.breakOnThrow = args.filters.indexOf("all") >= 0;
 		}
 		breakOnlyActive = args.filters.indexOf("activeOnly") >= 0;
+		sendResponse(response);
+	}
+
+	override function exceptionInfoRequest(response:ExceptionInfoResponse, args:ExceptionInfoArguments) {
+		if( args.threadId != dbg.currentThread )
+			dbg.setCurrentThread(args.threadId);
+		var exception = dbg.getException();
+		if( exception == null ) {
+			errorMessageAndResponse(cast response, "Thread is not stopped on an exception");
+			return;
+		}
+		var typeName = dbg.eval.typeStr(exception.t);
+		if( typeName.charCodeAt(0) == '$'.code ) typeName = typeName.substr(1);
+		var message = switch( exception.v ) {
+			case VString(value, _):
+				typeName = "String";
+				value;
+			default: dbg.eval.valueStr(exception);
+		};
+		var stackTrace = [for( frame in dbg.getBackTrace() ) frame.file + ":" + frame.line].join("\n");
+		response.body = {
+			exceptionId : typeName,
+			description : message,
+			breakMode : Always,
+			details : {
+				message : message,
+				typeName : typeName,
+				fullTypeName : typeName,
+				stackTrace : stackTrace,
+			},
+		};
 		sendResponse(response);
 	}
 
