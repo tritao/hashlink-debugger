@@ -7,7 +7,7 @@ extern class Native {
 	static function debugStart( pid : Int ) : Bool;
 	static function debugStop( pid : Int ) : Void;
 	static function debugBreakpoint( pid : Int ) : Bool;
-	static function debugRead( pid : Int, ptr : String, size : Int ) : String;
+	static function debugRead( pid : Int, ptr : String, size : Int ) : Null<String>;
 	static function debugWrite( pid : Int, ptr : String, buffer : String, size : Int ) : Bool;
 	static function debugFlush( pid : Int, ptr : String, size : Int ) : Bool;
 	static function debugWait( pid : Int, timeout : Int ) : js.node.Buffer;
@@ -50,13 +50,17 @@ class NodeDebugApiNative implements Api {
 	}
 
 	public function read( ptr : Pointer, buffer : Buffer, size : Int ) : Bool {
-		var b = Buffer.fromBinaryString(Native.debugRead(pid, makePointer(ptr).toBinaryString(), size));
+		var data = Native.debugRead(pid, makePointer(ptr).toBinaryString(), size);
+		if( data == null ) return false;
+		var b = Buffer.fromBinaryString(data);
 		@:privateAccess buffer.buf = b.buf;
 		return true;
 	}
 
 	function internalRead( ptr : Pointer, size : Int ) : Buffer {
-		return Buffer.fromBinaryString(Native.debugRead(pid, makePointer(ptr).toBinaryString(), size));
+		var data = Native.debugRead(pid, makePointer(ptr).toBinaryString(), size);
+		if( data == null ) throw "Failed to read @" + ptr.toString() + "[" + size + "]";
+		return Buffer.fromBinaryString(data);
 	}
 
 	public function readByte( ptr : Pointer, pos : Int ) : Int {

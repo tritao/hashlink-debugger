@@ -49,20 +49,29 @@ Napi::Boolean debugBreakpoint(const Napi::CallbackInfo& info) {
 	return Napi::Boolean::New(env, hl_debug_breakpoint(pid));
 }
 
-Napi::String debugRead(const Napi::CallbackInfo& info) {
+Napi::Value debugRead(const Napi::CallbackInfo& info) {
 	Napi::Env env = info.Env();
 
+	if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsString() || !info[2].IsNumber())
+		return env.Null();
 	int pid = info[0].As<Napi::Number>().Int32Value();
 	std::u16string ptr = data_from_napi_string(info[1].ToString());
 	int size = info[2].As<Napi::Number>().Int32Value();
-
-	int bufsize = size;
-	if (bufsize % 2 == 1)
-		bufsize++;
-	vbyte* rbuf = (vbyte*) malloc(bufsize);
-	rbuf[bufsize-1] = 0;
-	Napi::Boolean r = Napi::Boolean::New(env, hl_debug_read(pid, *(vbyte**)ptr.c_str(), rbuf, size));
-	Napi::String ostr = data_to_napi_string(env, rbuf, bufsize);
+	if (ptr.size() * sizeof(char16_t) < sizeof(vbyte*) || size < 0 || size > 256 * 1024 * 1024)
+		return env.Null();
+	if (size == 0)
+		return Napi::String::New(env, "");
+	size_t bufsize = ((size_t)size + 1) & ~(size_t)1;
+	vbyte* rbuf = (vbyte*) calloc(1, bufsize);
+	if (rbuf == NULL)
+		return env.Null();
+	vbyte *address;
+	memcpy(&address, ptr.data(), sizeof(address));
+	if (!hl_debug_read(pid, address, rbuf, size)) {
+		free(rbuf);
+		return env.Null();
+	}
+	Napi::String ostr = data_to_napi_string(env, rbuf, (int)bufsize);
 	free(rbuf);
 
 	return ostr;

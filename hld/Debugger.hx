@@ -464,7 +464,8 @@ class Debugger {
 	public function getCurrentVars( args : Bool ) {
 		var s = currentStack[currentStackFrame];
 		if( s == null || s.fidx == Eval.TRAMPOLINE_FIDX ) return [];
-		var g = module.getGraph(s.fidx);
+		var owner = s.module == null ? module : s.module;
+		var g = owner.getGraph(s.fidx);
 		if( args )
 			return g.getArgs();
 		var locals = g.getLocals(s.fpos);
@@ -507,7 +508,8 @@ class Debugger {
 		var s = currentStack[currentStackFrame];
 		if( s.fidx == Eval.TRAMPOLINE_FIDX )
 			return null;
-		var ctx = module.getMethodContext(s.fidx);
+		var owner = s.module == null ? module : s.module;
+		var ctx = owner.getMethodContext(s.fidx);
 		if( ctx == null )
 			return null;
 		var name = ctx.obj.name;
@@ -1265,7 +1267,13 @@ class Debugger {
 	}
 
 	public function end() {
-		if( stoppedThread != null ) resume();
+		// Teardown also runs after the target has exited or been killed. Resume it
+		// when possible, but do not turn an already-gone process into an adapter
+		// exception.
+		if( stoppedThread != null ) {
+			api.resume(stoppedThread);
+			stoppedThread = null;
+		}
 		if( api != null ) {
 			api.stop();
 			api = null;
