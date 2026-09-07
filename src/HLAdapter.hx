@@ -182,9 +182,27 @@ class HLAdapter extends DebugSession {
 	override function exceptionInfoRequest(response:ExceptionInfoResponse, args:ExceptionInfoArguments) {
 		if( args.threadId != dbg.currentThread )
 			dbg.setCurrentThread(args.threadId);
+		if( !dbg.hasException() ) {
+			errorMessageAndResponse(cast response, "Thread is not stopped on an exception");
+			return;
+		}
 		var exception = dbg.getException();
 		if( exception == null ) {
-			errorMessageAndResponse(cast response, "Thread is not stopped on an exception");
+			var message = "The exception value could not be decoded";
+			if( dbg.exceptionDecodeError != null )
+				message += ": " + dbg.exceptionDecodeError;
+			response.body = {
+				exceptionId : "Unknown exception",
+				description : message,
+				breakMode : Always,
+				details : {
+					message : message,
+					typeName : "Unknown exception",
+					fullTypeName : "Unknown exception",
+					stackTrace : [for( frame in dbg.getBackTrace() ) frame.file + ":" + frame.line].join("\n"),
+				},
+			};
+			sendResponse(response);
 			return;
 		}
 		var typeName = dbg.eval.typeStr(exception.t);
@@ -570,6 +588,7 @@ class HLAdapter extends DebugSession {
 		switch( msg ) {
 		case Breakpoint, Watchbreak:
 			//debug("Thread " + dbg.currentThread + " paused " + frameStr(dbg.getStackFrame()));
+			var hasException = dbg.hasException();
 			var exc = dbg.getException();
 			var str = null;
 			if( exc != null ) {
@@ -582,7 +601,7 @@ class HLAdapter extends DebugSession {
 
 			var reason = if( msg == Watchbreak )
 				"data breakpoint"
-			else if( exc != null )
+			else if( hasException )
 				"exception"
 			else if( isPause )
 				"paused"
@@ -597,6 +616,8 @@ class HLAdapter extends DebugSession {
 				dbg.setCurrentThread(tid);
 				debug("Switch thread "+tid);
 			}
+			if( hasException && exc == null )
+				str = "Exception value unavailable";
 			var ev = new StoppedEvent(reason, tid, str);
 			ev.allThreadsStopped = true;
 			sendEvent(ev);

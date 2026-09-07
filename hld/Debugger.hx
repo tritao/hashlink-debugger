@@ -417,13 +417,28 @@ class Debugger {
 		setReg(tid, EFlags, hld.Pointer.make(r,0));
 	}
 
-	public function getException() : Null<Value> {
+	public var exceptionDecodeError(default, null) : Null<String>;
+
+	public function hasException() : Bool {
 		var t = threads.get(currentThread);
-		if( t == null )
+		return t != null && !t.exception.isNull();
+	}
+
+	public function getException() : Null<Value> {
+		exceptionDecodeError = null;
+		var t = threads.get(currentThread);
+		if( t == null || t.exception.isNull() )
 			return null;
-		var exc = t.exception;
-		if( exc.isNull() )
+		try {
+			return decodeException(t.exception);
+		} catch( e : Dynamic ) {
+			exceptionDecodeError = Std.string(e);
+			if( DEBUG ) trace("Failed to decode exception: " + exceptionDecodeError);
 			return null;
+		}
+	}
+
+	function decodeException( exc : Pointer ) : Value {
 		var v = eval.readVal(exc, HDyn);
 		switch( v.t ) {
 		case HObj({ name : "haxe.ValueException" }):
@@ -755,7 +770,7 @@ class Debugger {
 		var tid = currentThread;
 		var s = currentStack[0];
 		var depth = currentStack.length;
-		var onException = getException() != null;
+		var onException = hasException();
 
 		if( s == null || s.fidx == Eval.TRAMPOLINE_FIDX || onException ) {
 			if( DEBUG ) trace("Step not supported, continue.");
