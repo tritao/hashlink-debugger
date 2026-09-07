@@ -327,6 +327,15 @@ class JitInfo {
 		return null;
 	}
 
+	public function removeModule(identity:Pointer):Null<JitInfo> {
+		for( item in debugModules )
+			if( item.moduleIdentity == identity ) {
+				debugModules.remove(item);
+				return item;
+			}
+		return null;
+	}
+
 	function replaceModule(next:JitInfo) {
 		applySourceSpans(next);
 		if( moduleIdentity == next.moduleIdentity ) {

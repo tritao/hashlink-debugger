@@ -210,6 +210,12 @@ class Debugger {
 						DebugTrace.write("debugger", "rev3_received", { moduleLow : identityLow, moduleHigh : identityHigh, revision : revision });
 						revisionNotificationPending = true;
 						requestDebugMappings();
+					} else if( marker == "REM3" ) {
+						var identity = Pointer.make(input.readInt32(), jit.is64 ? input.readInt32() : 0);
+						if( !removeDebugModule(identity) ) throw "Unknown REM3 module";
+						DebugTrace.write("debugger", "rem3_applied", { module : identity.toString() });
+						if( onDebugMappingsChanged != null ) onDebugMappingsChanged();
+						#if hxnodejs sock.write("A") #else sock.output.writeByte("A".code) #end;
 					} else if( marker == "MAP3" ) {
 						if( !jit.readRefresh(input, false) ) { close(); return; }
 						DebugTrace.write("debugger", "map3_applied", { modules : 1 + jit.debugModules.length, breakpoints : breakPoints.length });
@@ -392,6 +398,15 @@ class Debugger {
 		if( jit.moduleIdentity == identity ) return jit;
 		for( item in jit.debugModules ) if( item.moduleIdentity == identity ) return item;
 		return null;
+	}
+
+	function removeDebugModule(identity:Pointer):Bool {
+		var removed = jit.removeModule(identity);
+		if( removed == null ) return false;
+		for( bp in breakPoints.copy() )
+			if( bp.jit == removed ) breakPoints.remove(bp);
+		evalByModule.remove(removed.module);
+		return true;
 	}
 
 	public function getThreads() {
