@@ -1,6 +1,6 @@
 package hld;
 
-private typedef FunctionSourceSpan = { var file : String; var line : Int; var start : Int; var end : Int; var flags : Int; }
+private typedef FunctionSourceSpan = { var file : String; var line : Int; var column : Int; var endLine : Int; var endColumn : Int; var sourceHash : Int; var start : Int; var end : Int; var flags : Int; }
 private typedef JitFunctionMapping = { var stableId : Int; var start : Pointer; var large : Bool; var offsets : haxe.io.Bytes; @:optional var vars : haxe.io.Bytes; @:optional var sourceSpans : Array<FunctionSourceSpan>; }
 
 private enum DebugFlag {
@@ -273,10 +273,13 @@ class JitInfo {
 		if( count != 0 && count != nops ) return null;
 		var spans = [];
 		for( _ in 0...count ) {
-			var file = input.readInt32(), line = input.readInt32(), start = input.readInt32(), end = input.readInt32(), flags = input.readInt32();
-			if( file < 0 || file >= targetModule.code.debugFiles.length || line < 1 || flags < 0
+			var file = input.readInt32(), line = input.readInt32(), column = input.readInt32(), endLine = input.readInt32(), endColumn = input.readInt32(),
+				sourceHash = input.readInt32(), start = input.readInt32(), end = input.readInt32(), flags = input.readInt32();
+			if( file < 0 || file >= targetModule.code.debugFiles.length || line < 1 || column < 1 || endLine < line || endColumn < 1
+				|| endLine == line && endColumn < column || flags < 0
 				|| !((start == -1 && end == -1) || (start >= 0 && end >= start)) ) return null;
-			spans.push({file:targetModule.code.debugFiles[file], line:line, start:start, end:end, flags:flags});
+			spans.push({file:targetModule.code.debugFiles[file], line:line, column:column, endLine:endLine, endColumn:endColumn,
+				sourceHash:sourceHash, start:start, end:end, flags:flags});
 		}
 		return spans;
 	}

@@ -29,6 +29,7 @@ typedef ActiveDataBreakpoint = {
 
 typedef SourceBreakpoint = {
 	var line : Int;
+	var column : Null<Int>;
 	var condition : Null<String>;
 	var logMessage : Null<String>;
 }
@@ -805,11 +806,12 @@ class HLAdapter extends DebugSession {
 		for( bp in args.breakpoints ) {
 			var line = -1;
 			for( f in files ) {
-				var location = dbg.checkBreakpointLocation(f, bp.line);
+				var location = dbg.checkBreakpointLocation(f, bp.line, bp.column);
 				line = location == null ? -1 : location.line;
 				if( location != null ) {
-					breakPos.get(f).push({line : line, condition : bp.condition, logMessage : bp.logMessage});
-					bps.push({ line : line, column : sourceColumn(args.source.path, location.start), verified : true, message : null });
+					breakPos.get(f).push({line : line, column : bp.column, condition : bp.condition, logMessage : bp.logMessage});
+					bps.push({ line : line, column : location.column, endLine : location.endLine, endColumn : location.endColumn,
+						verified : true, message : null });
 					break;
 				}
 			}
@@ -835,7 +837,7 @@ class HLAdapter extends DebugSession {
 		if( active ) {
 			for( f => bps in breakPos ) {
 				for( bp in bps )
-					var line = dbg.addBreakpoint(f, bp.line, bp.condition);
+					var line = dbg.addBreakpoint(f, bp.line, bp.condition, bp.column);
 			}
 		}
 		if( forcePaused )
@@ -887,7 +889,9 @@ class HLAdapter extends DebugSession {
 							sourceReference : file == null ? allocValue(VUnkownFile(f.file)) : 0,
 						},
 						line : f.line,
-						column : sourceColumn(file, f.start)
+						column : f.column,
+						endLine : f.endLine,
+						endColumn : f.endColumn
 					};
 				}
 			}],
@@ -902,18 +906,6 @@ class HLAdapter extends DebugSession {
 			});
 		}
 		sendResponse(response);
-	}
-
-	function sourceColumn(path:Null<String>, offset:Null<Int>):Int {
-		if( path == null || offset == null || offset < 0 ) return 1;
-		try {
-			var source = sys.io.File.getContent(path);
-			if( offset > source.length ) return 1;
-			var lineStart = source.lastIndexOf("\n", offset - 1);
-			return offset - lineStart;
-		} catch( _ : Dynamic ) {
-			return 1;
-		}
 	}
 
 	function allocValue( v ) {

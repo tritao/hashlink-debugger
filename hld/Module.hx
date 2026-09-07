@@ -1,6 +1,8 @@
 package hld;
 import format.hl.Data;
 
+private typedef OpcodeSourceSpan = { var sourcePath:String; var start:Int; var end:Int; var line:Int; var column:Int; var endLine:Int; var endColumn:Int; var sourceHash:Int; var flags:Int; }
+
 private typedef GlobalAccess = {
 	var sub : Map<String,GlobalAccess>;
 	var gid : Null<Int>;
@@ -39,7 +41,7 @@ class Module {
 	var graphCache : Map<Int, CodeGraph>;
 	var methods : Array<{ obj : ObjPrototype, field : String }>;
 	var functionIdentities : Array<{ stableId : Int, name : String, displayName : String, ifun : Int, sourcePath : String, start : Int, end : Int, line : Int, flags : Int }>;
-	var opcodeSourceSpans : Map<Int,Map<Int,{ sourcePath : String, start : Int, end : Int, line : Int, flags : Int }>>;
+	var opcodeSourceSpans : Map<Int,Map<Int,OpcodeSourceSpan>>;
 	var functionsIndexes : Map<Int,Int>;
 	var isWindows : Bool;
 	var closureContextId : Int = 0;
@@ -90,11 +92,12 @@ class Module {
 		return null;
 	}
 
-	public function replaceOpcodeSourceSpans(ifun:Int, spans:Array<{file:String, line:Int, start:Int, end:Int, flags:Int}>):Void {
-		var mappings:Map<Int,{ sourcePath : String, start : Int, end : Int, line : Int, flags : Int }> = [];
+	public function replaceOpcodeSourceSpans(ifun:Int, spans:Array<{file:String, line:Int, column:Int, endLine:Int, endColumn:Int, sourceHash:Int, start:Int, end:Int, flags:Int}>):Void {
+		var mappings:Map<Int,OpcodeSourceSpan> = [];
 		for( opcode in 0...spans.length ) {
 			var span = spans[opcode];
-			mappings.set(opcode, {sourcePath:span.file, line:span.line, start:span.start, end:span.end, flags:span.flags});
+			mappings.set(opcode, {sourcePath:span.file, line:span.line, column:span.column, endLine:span.endLine, endColumn:span.endColumn,
+				sourceHash:span.sourceHash, start:span.start, end:span.end, flags:span.flags});
 		}
 		opcodeSourceSpans.set(ifun, mappings);
 	}
@@ -184,7 +187,7 @@ class Module {
 		}
 		if( input.position != data.length ) throw "Trailing data after HLB debug sections";
 		for( section in sections ) if( section.kind == 1 && section.version == 1 ) readFunctionIdentities(section.payload);
-		for( section in sections ) if( section.kind == 2 && section.version == 1 ) readOpcodeSourceSpans(section.payload);
+		for( section in sections ) if( section.kind == 2 && section.version == 2 ) readOpcodeSourceSpans(section.payload);
 	}
 
 	function readFunctionIdentities(bytes:haxe.io.Bytes) {
@@ -221,14 +224,17 @@ class Module {
 			for( identity in functionIdentities ) if( identity.stableId == stableId ) { ifun = identity.ifun; break; }
 			if( ifun == null || seenFunctions.exists(stableId) ) throw "Invalid HLB opcode source-span function";
 			seenFunctions.set(stableId, true);
-			var mappings:Map<Int,{ sourcePath : String, start : Int, end : Int, line : Int, flags : Int }> = [];
+			var mappings:Map<Int,OpcodeSourceSpan> = [];
 			for( _ in 0...readUnsignedIndex(input) ) {
 				var opcode = readUnsignedIndex(input), file = readUnsignedIndex(input), start = readIndex(input) - 1,
-					end = readIndex(input) - 1, line = readUnsignedIndex(input), flags = readUnsignedIndex(input);
+					end = readIndex(input) - 1, line = readUnsignedIndex(input), column = readUnsignedIndex(input), endLine = readUnsignedIndex(input),
+					endColumn = readUnsignedIndex(input), sourceHash = input.readInt32(), flags = readUnsignedIndex(input);
 				var validRange = start == -1 && end == -1 || start >= 0 && end >= start;
 				if( opcode >= code.functions[ifun].ops.length || file >= files.length || mappings.exists(opcode)
-					|| line < 1 || !validRange ) throw "Invalid HLB opcode source span";
-				mappings.set(opcode, {sourcePath:files[file], start:start, end:end, line:line, flags:flags});
+					|| line < 1 || column < 1 || endLine < line || endColumn < 1 || endLine == line && endColumn < column
+					|| !validRange ) throw "Invalid HLB opcode source span";
+				mappings.set(opcode, {sourcePath:files[file], start:start, end:end, line:line, column:column, endLine:endLine,
+					endColumn:endColumn, sourceHash:sourceHash, flags:flags});
 			}
 			opcodeSourceSpans.set(ifun, mappings);
 		}
@@ -487,7 +493,7 @@ class Module {
 		return { functions : functions, fidx : ifile };
 	}
 
-	public function getBreaks( file : String, line : Int ) {
+	public function getBreaks( file : String, line : Int, ?column : Int ) {
 		var ffuns = getFileFunctions(file);
 		if( ffuns == null )
 			return null;
@@ -544,7 +550,25 @@ class Module {
 				line++;
 			}
 		}
+		if( column != null && breaks.length > 0 ) {
+			var best = 0x7FFFFFFF;
+			for( point in breaks ) {
+				var rank = sourceSpanRank(point.ifun, point.pos, line, column);
+				if( rank < best ) best = rank;
+			}
+			breaks = [for( point in breaks ) if( sourceSpanRank(point.ifun, point.pos, line, column) == best ) point];
+		}
 		return { breaks : breaks, line : line };
+	}
+
+	function sourceSpanRank(ifun:Int, opcode:Int, line:Int, column:Int):Int {
+		var mappings = opcodeSourceSpans.get(ifun), span = mappings == null ? null : mappings.get(opcode);
+		if( span == null ) return 0x70000000;
+		var generated = (span.flags & 1) == 0 ? 0 : 0x10000000;
+		if( line < span.line || line > span.endLine ) return generated + 0x08000000;
+		if( line == span.line && column < span.column ) return generated + span.column - column;
+		if( line == span.endLine && column > span.endColumn ) return generated + 0x01000000 + column - span.endColumn;
+		return generated;
 	}
 
 	public function isValid( fidx : Int, fpos : Int ) {
@@ -558,8 +582,9 @@ class Module {
 		var fid = f.debug[fpos << 1];
 		var fline = f.debug[(fpos << 1) + 1];
 		var spans = opcodeSourceSpans.get(fidx), span = spans == null ? null : spans.get(fpos);
-		return span == null ? { file : code.debugFiles[fid], line : fline, start : -1, end : -1, flags : 0 }
-			: { file : span.sourcePath, line : span.line, start : span.start, end : span.end, flags : span.flags };
+		return span == null ? { file : code.debugFiles[fid], line : fline, column : 1, endLine : fline, endColumn : 1, sourceHash : 0, start : -1, end : -1, flags : 0 }
+			: { file : span.sourcePath, line : span.line, column : span.column, endLine : span.endLine, endColumn : span.endColumn,
+				sourceHash : span.sourceHash, start : span.start, end : span.end, flags : span.flags };
 	}
 
 	public function getFunctionRegs( fidx : Int ) {

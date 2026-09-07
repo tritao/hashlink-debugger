@@ -45,6 +45,10 @@ class BreakContext {
 class StackInfo {
 	var file : String;
 	var line : Int;
+	@:optional var column : Int;
+	@:optional var endLine : Int;
+	@:optional var endColumn : Int;
+	@:optional var sourceHash : Int;
 	@:optional var start : Int;
 	@:optional var end : Int;
 	var ebp : Pointer;
@@ -822,7 +826,10 @@ class Debugger {
 				continue;
 			var l = module.resolveSymbol(s.fidx, pos);
 			var c = graph.control(pos);
-			var lineChange = mode != Out && (l.file != orig.file || l.line != orig.line) && !c.match(CCatch | CJAlways(_));
+			var hasSpans = orig.start >= 0 && l.start >= 0;
+			var sourceChange = mode == Into && hasSpans ? l.file != orig.file || l.sourceHash != orig.sourceHash || l.start != orig.start || l.end != orig.end
+				: l.file != orig.file || l.line != orig.line;
+			var lineChange = mode != Out && (l.flags & 1) == 0 && sourceChange && !c.match(CCatch | CJAlways(_));
 			switch( c ) {
 			case CCall(f) if( f >= 0 && mode == Into ):
 				// skip calls to std library
@@ -1167,10 +1174,11 @@ class Debugger {
 
 	function stackInfo( f ) : StackInfo {
 		if( f.fidx == Eval.TRAMPOLINE_FIDX )
-			return { file : "<native>", line : 0, start : -1, end : -1, ebp : f.ebp, context : null, functionName : null };
+			return { file : "<native>", line : 0, column : 0, endLine : 0, endColumn : 0, sourceHash : 0, start : -1, end : -1, ebp : f.ebp, context : null, functionName : null };
 		var owner : Module = f.module == null ? module : f.module;
 		var s = owner.resolveSymbol(f.fidx, f.fpos);
-		return { file : s.file, line : s.line, start : s.start, end : s.end, ebp : f.ebp, context : owner.getMethodContext(f.fidx), functionName : owner.getFunctionDebugName(f.fidx) };
+		return { file : s.file, line : s.line, column : s.column, endLine : s.endLine, endColumn : s.endColumn, sourceHash : s.sourceHash,
+			start : s.start, end : s.end, ebp : f.ebp, context : owner.getMethodContext(f.fidx), functionName : owner.getFunctionDebugName(f.fidx) };
 	}
 
 	function setContext(global:Bool) {
@@ -1362,21 +1370,22 @@ class Debugger {
 		return -1;
 	}
 
-	public function checkBreakpointLocation(file : String, line : Int) {
+	public function checkBreakpointLocation(file : String, line : Int, ?column : Int) {
 		for( owner in allJitModules() ) {
-			var breaks = owner.module.getBreaks(file, line);
+			var breaks = owner.module.getBreaks(file, line, column);
 			if( breaks == null || breaks.breaks.length == 0 ) continue;
 			var point = breaks.breaks[0], symbol = owner.module.resolveSymbol(point.ifun, point.pos);
-			return {line:breaks.line, start:symbol.start, end:symbol.end};
+			return {line:breaks.line, column:symbol.column, endLine:symbol.endLine, endColumn:symbol.endColumn,
+				sourceHash:symbol.sourceHash, start:symbol.start, end:symbol.end};
 		}
 		return null;
 	}
 
-	public function addBreakpoint( file : String, line : Int, condition : Null<String> ) {
+	public function addBreakpoint( file : String, line : Int, condition : Null<String>, ?column : Int ) {
 		var resolvedLine = -1;
 		var installed = false;
 		for( owner in allJitModules() ) {
-			var breaks = owner.module.getBreaks(file, line);
+			var breaks = owner.module.getBreaks(file, line, column);
 			if( breaks == null ) continue;
 			resolvedLine = breaks.line;
 			for( b in breaks.breaks ) {
