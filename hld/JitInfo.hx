@@ -1,5 +1,8 @@
 package hld;
 
+private typedef FunctionSourceSpan = { var file : String; var line : Int; var start : Int; var end : Int; var flags : Int; }
+private typedef JitFunctionMapping = { var stableId : Int; var start : Pointer; var large : Bool; var offsets : haxe.io.Bytes; @:optional var vars : haxe.io.Bytes; @:optional var sourceSpans : Array<FunctionSourceSpan>; }
+
 private enum DebugFlag {
 	Is64; // runs in 64 bit mode
 	Bool4; // bool = 4 bytes (instead of 1)
@@ -35,8 +38,8 @@ class JitInfo {
 	var codeSize : Int;
 	var allTypes : Pointer;
 
-	var functions : Array<{ stableId : Int, start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
-	var baseFunctions : Array<{ stableId : Int, start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
+	var functions : Array<JitFunctionMapping>;
+	var baseFunctions : Array<JitFunctionMapping>;
 	var functionByCodePos : Int64Map<Int>;
 	public var module(default,null) : Module;
 	var codeRanges : Array<{ start : Pointer, end : Pointer }> = [];
@@ -152,12 +155,15 @@ class JitInfo {
 				if( nops != fn.debug.length >> 1 || varsSize < 0 ) return false;
 				var offsets = input.read((nops + 1) * (large ? 4 : 2));
 				var vars = input.read(varsSize);
+				var sourceSpans = readSourceSpans(module, nops);
+				if( sourceSpans == null ) return false;
 				if( !retired ) {
-					functions[functionIndex] = {stableId: stableId, start: start, large: large, offsets: offsets, vars: vars};
+					functions[functionIndex] = {stableId: stableId, start: start, large: large, offsets: offsets, vars: vars, sourceSpans: sourceSpans};
 					functionByCodePos.set(start.i64,functionIndex);
 				}
 			}
 		}
+		applySourceSpans(this);
 		return true;
 	}
 
@@ -212,8 +218,10 @@ class JitInfo {
 					if( nops != fn.debug.length >> 1 || varsSize < 0 ) return false;
 					var offsets = input.read((nops + 1) * (large ? 4 : 2));
 					var vars = input.read(varsSize);
+					var sourceSpans = readSourceSpans(targetModule, nops);
+					if( sourceSpans == null ) return false;
 					if( !retired ) {
-						next.functions[functionIndex] = { stableId: stableId, start: start, large: large, offsets: offsets, vars: vars };
+						next.functions[functionIndex] = { stableId: stableId, start: start, large: large, offsets: offsets, vars: vars, sourceSpans: sourceSpans };
 						next.functionByCodePos.set(start.i64, functionIndex);
 					}
 				}
@@ -244,7 +252,9 @@ class JitInfo {
 			var varsSize = input.readInt32();
 			var large = input.readByte() != 0;
 			if( nops != fn.debug.length >> 1 || varsSize < 0 ) return false;
-			parsed.push({ stableId: stableId, start: fnStart, large: large, offsets: input.read((nops + 1) * (large ? 4 : 2)), vars: input.read(varsSize) });
+			var offsets = input.read((nops + 1) * (large ? 4 : 2)), vars = input.read(varsSize), sourceSpans = readSourceSpans(targetModule, nops);
+			if( sourceSpans == null ) return false;
+			parsed.push({ stableId: stableId, start: fnStart, large: large, offsets: offsets, vars: vars, sourceSpans: sourceSpans });
 		}
 		if( target != null ) {
 			target.codeStart = start;
@@ -256,6 +266,19 @@ class JitInfo {
 			for( index in 0...parsed.length ) target.functionByCodePos.set(parsed[index].start.i64, index);
 		}
 		return true;
+	}
+
+	function readSourceSpans(targetModule:Module, nops:Int):Null<Array<FunctionSourceSpan>> {
+		var count = input.readInt32();
+		if( count != 0 && count != nops ) return null;
+		var spans = [];
+		for( _ in 0...count ) {
+			var file = input.readInt32(), line = input.readInt32(), start = input.readInt32(), end = input.readInt32(), flags = input.readInt32();
+			if( file < 0 || file >= targetModule.code.debugFiles.length || line < 1 || flags < 0
+				|| !((start == -1 && end == -1) || (start >= 0 && end >= start)) ) return null;
+			spans.push({file:targetModule.code.debugFiles[file], line:line, start:start, end:end, flags:flags});
+		}
+		return spans;
 	}
 
 	function cloneForModule(module:Module, identity:Pointer, revision:Int) {
@@ -282,6 +305,7 @@ class JitInfo {
 	}
 
 	function replaceModule(next:JitInfo) {
+		applySourceSpans(next);
 		if( moduleIdentity == next.moduleIdentity ) {
 			moduleRevision = next.moduleRevision;
 			functions = next.functions;
@@ -295,6 +319,13 @@ class JitInfo {
 				return;
 			}
 		debugModules.push(next);
+	}
+
+	function applySourceSpans(owner:JitInfo) {
+		for( index in 0...owner.functions.length ) {
+			var fn = owner.functions[index];
+			if( fn != null && fn.sourceSpans != null && fn.sourceSpans.length > 0 ) owner.module.replaceOpcodeSourceSpans(index, fn.sourceSpans);
+		}
 	}
 
 	function readModule( skipHeader=false ) {

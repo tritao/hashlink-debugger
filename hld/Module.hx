@@ -90,6 +90,15 @@ class Module {
 		return null;
 	}
 
+	public function replaceOpcodeSourceSpans(ifun:Int, spans:Array<{file:String, line:Int, start:Int, end:Int, flags:Int}>):Void {
+		var mappings:Map<Int,{ sourcePath : String, start : Int, end : Int, line : Int, flags : Int }> = [];
+		for( opcode in 0...spans.length ) {
+			var span = spans[opcode];
+			mappings.set(opcode, {sourcePath:span.file, line:span.line, start:span.start, end:span.end, flags:span.flags});
+		}
+		opcodeSourceSpans.set(ifun, mappings);
+	}
+
 	public function load( data : haxe.io.Bytes ) {
 		var version = data.length > 3 ? data.get(3) : 0;
 		var readerBytes = data;
