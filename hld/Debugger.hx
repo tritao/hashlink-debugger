@@ -1381,6 +1381,28 @@ class Debugger {
 		return null;
 	}
 
+	public function getBreakpointLocations(file:String, line:Int, ?column:Int, ?endLine:Int, ?endColumn:Int) {
+		var result = [], seen = new Map<String,Bool>();
+		for( owner in allJitModules() ) {
+			var locations = owner.module.getBreakpointLocations(file, line, column, endLine, endColumn);
+			if( locations == null ) continue;
+			for( location in locations ) {
+				if( !owner.hasFunction(location.ifun) ) continue;
+				var key = location.line + ":" + location.column + ":" + location.endLine + ":" + location.endColumn;
+				if( seen.exists(key) ) continue;
+				seen.set(key, true);
+				result.push({line:location.line, column:location.column, endLine:location.endLine, endColumn:location.endColumn});
+			}
+		}
+		result.sort(function(a, b) {
+			if( a.line != b.line ) return a.line - b.line;
+			if( a.column != b.column ) return a.column - b.column;
+			if( a.endLine != b.endLine ) return a.endLine - b.endLine;
+			return a.endColumn - b.endColumn;
+		});
+		return result;
+	}
+
 	public function addBreakpoint( file : String, line : Int, condition : Null<String>, ?column : Int ) {
 		var resolvedLine = -1;
 		var installed = false;

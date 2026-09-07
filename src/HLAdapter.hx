@@ -126,6 +126,7 @@ class HLAdapter extends DebugSession {
 		response.body.supportsSetVariable = true;
 		response.body.supportsDataBreakpoints = true;
 		response.body.supportsExceptionInfoRequest = true;
+		response.body.supportsBreakpointLocationsRequest = true;
 
 		response.body.exceptionBreakpointFilters = [
 			{ filter : "all", label : "Stop on all exceptions" },
@@ -133,6 +134,24 @@ class HLAdapter extends DebugSession {
 		];
 
 		sendResponse( response );
+	}
+
+	override function breakpointLocationsRequest(response:BreakpointLocationsResponse, args:BreakpointLocationsArguments):Void {
+		var locations:Array<BreakpointLocation> = [];
+		if( args.source.path != null )
+			for( file in getLocalFiles(args.source.path) )
+				for( location in dbg.getBreakpointLocations(file, args.line, args.column, args.endLine, args.endColumn) )
+					if( !Lambda.exists(locations, function(existing) return existing.line == location.line && existing.column == location.column
+						&& existing.endLine == location.endLine && existing.endColumn == location.endColumn) )
+						locations.push(location);
+		locations.sort(function(a, b) {
+			if( a.line != b.line ) return a.line - b.line;
+			if( a.column != b.column ) return a.column - b.column;
+			if( a.endLine != b.endLine ) return a.endLine - b.endLine;
+			return a.endColumn - b.endColumn;
+		});
+		response.body = { breakpoints : locations };
+		sendResponse(response);
 	}
 
 	function debug(v:Dynamic, ?pos:haxe.PosInfos) {

@@ -527,6 +527,7 @@ class Module {
 						i++;
 						continue;
 					}
+					var groupStart = i;
 					var op = f.ops[i].getIndex();
 					if( first == -1 || first == op ) {
 						first = op;
@@ -537,8 +538,9 @@ class Module {
 					while( i < len ) {
 						var dfile = f.debug[i << 1];
 						var dline = f.debug[(i << 1) + 1];
-						if( dfile == ffuns.fidx && dline != line )
-							break;
+						if( dfile == ffuns.fidx ) {
+							if( dline != line || !sameBreakpointSpan(ifun, groupStart, i) ) break;
+						}
 						i++;
 					}
 				}
@@ -559,6 +561,47 @@ class Module {
 			breaks = [for( point in breaks ) if( sourceSpanRank(point.ifun, point.pos, line, column) == best ) point];
 		}
 		return { breaks : breaks, line : line };
+	}
+
+	function sameBreakpointSpan(ifun:Int, first:Int, other:Int):Bool {
+		var mappings = opcodeSourceSpans.get(ifun);
+		if( mappings == null ) return true;
+		var a = mappings.get(first), b = mappings.get(other);
+		if( a == null ) return b == null;
+		return b != null && a.sourcePath == b.sourcePath && a.start == b.start && a.end == b.end
+			&& a.line == b.line && a.column == b.column && a.endLine == b.endLine && a.endColumn == b.endColumn;
+	}
+
+	public function getBreakpointLocations(file:String, line:Int, ?column:Int, ?endLine:Int, ?endColumn:Int) {
+		var ffuns = getFileFunctions(file);
+		if( ffuns == null ) return null;
+		var lastLine = endLine == null ? line : endLine;
+		var firstColumn = column == null ? 1 : column;
+		var lastColumn = endColumn == null ? 0x7FFFFFFF : endColumn;
+		var locations = [];
+		var seen = new Map<String,Bool>();
+		for( entry in ffuns.functions ) {
+			var f = entry.f;
+			for( pos in 0...(f.debug.length >> 1) ) {
+				if( f.debug[pos << 1] != ffuns.fidx ) continue;
+				var symbol = resolveSymbol(entry.ifun, pos);
+				if( (symbol.flags & 1) != 0 || symbol.line < line || symbol.line > lastLine ) continue;
+				if( symbol.line == line && symbol.column < firstColumn ) continue;
+				if( symbol.line == lastLine && symbol.column > lastColumn ) continue;
+				var key = symbol.line + ":" + symbol.column + ":" + symbol.endLine + ":" + symbol.endColumn;
+				if( seen.exists(key) ) continue;
+				seen.set(key, true);
+				locations.push({ ifun:entry.ifun, line:symbol.line, column:symbol.column,
+					endLine:symbol.endLine, endColumn:symbol.endColumn });
+			}
+		}
+		locations.sort(function(a, b) {
+			if( a.line != b.line ) return a.line - b.line;
+			if( a.column != b.column ) return a.column - b.column;
+			if( a.endLine != b.endLine ) return a.endLine - b.endLine;
+			return a.endColumn - b.endColumn;
+		});
+		return locations;
 	}
 
 	function sourceSpanRank(ifun:Int, opcode:Int, line:Int, column:Int):Int {
