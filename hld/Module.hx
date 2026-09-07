@@ -39,6 +39,7 @@ class Module {
 	var graphCache : Map<Int, CodeGraph>;
 	var methods : Array<{ obj : ObjPrototype, field : String }>;
 	var functionIdentities : Array<{ stableId : Int, name : String, displayName : String, ifun : Int, sourcePath : String, start : Int, end : Int, line : Int, flags : Int }>;
+	var opcodeSourceSpans : Map<Int,Map<Int,{ sourcePath : String, start : Int, end : Int, line : Int, flags : Int }>>;
 	var functionsIndexes : Map<Int,Int>;
 	var isWindows : Bool;
 	var closureContextId : Int = 0;
@@ -51,6 +52,7 @@ class Module {
 		functionRegsCache = [];
 		methods = [];
 		functionIdentities = [];
+		opcodeSourceSpans = [];
 		isWindows = Sys.systemName() == "Windows";
 	}
 
@@ -160,16 +162,20 @@ class Module {
 		input.position = position;
 		input.bigEndian = false;
 		var count = readUnsignedIndex(input);
+		var sections = [], seen = new Map<String,Bool>();
 		for( _ in 0...count ) {
 			var kind = readUnsignedIndex(input);
 			var version = readUnsignedIndex(input);
 			var flags = readUnsignedIndex(input);
 			var length = readUnsignedIndex(input);
-			if( kind <= 0 || version <= 0 || length > data.length - input.position ) throw "Invalid HLB debug section";
-			var payload = input.read(length);
-			if( kind == 1 && version == 1 ) readFunctionIdentities(payload);
+			var key = kind + ":" + version;
+			if( kind <= 0 || version <= 0 || length > data.length - input.position || seen.exists(key) ) throw "Invalid HLB debug section";
+			seen.set(key, true);
+			sections.push({kind:kind, version:version, payload:input.read(length)});
 		}
 		if( input.position != data.length ) throw "Trailing data after HLB debug sections";
+		for( section in sections ) if( section.kind == 1 && section.version == 1 ) readFunctionIdentities(section.payload);
+		for( section in sections ) if( section.kind == 2 && section.version == 1 ) readOpcodeSourceSpans(section.payload);
 	}
 
 	function readFunctionIdentities(bytes:haxe.io.Bytes) {
@@ -195,6 +201,29 @@ class Module {
 			functionIdentities.push({stableId:stableId, name:name, displayName:displayName, ifun:ifun, sourcePath:sourcePath, start:start, end:end, line:line, flags:flags});
 		}
 		if( input.position != input.length ) throw "Trailing data in HLB function identities";
+	}
+
+	function readOpcodeSourceSpans(bytes:haxe.io.Bytes) {
+		var input = new haxe.io.BytesInput(bytes), files = [];
+		for( _ in 0...readUnsignedIndex(input) ) files.push(readSizedString(input));
+		var seenFunctions = new Map<Int,Bool>();
+		for( _ in 0...readUnsignedIndex(input) ) {
+			var stableId = readUnsignedIndex(input), ifun:Null<Int> = null;
+			for( identity in functionIdentities ) if( identity.stableId == stableId ) { ifun = identity.ifun; break; }
+			if( ifun == null || seenFunctions.exists(stableId) ) throw "Invalid HLB opcode source-span function";
+			seenFunctions.set(stableId, true);
+			var mappings:Map<Int,{ sourcePath : String, start : Int, end : Int, line : Int, flags : Int }> = [];
+			for( _ in 0...readUnsignedIndex(input) ) {
+				var opcode = readUnsignedIndex(input), file = readUnsignedIndex(input), start = readIndex(input) - 1,
+					end = readIndex(input) - 1, line = readUnsignedIndex(input), flags = readUnsignedIndex(input);
+				var validRange = start == -1 && end == -1 || start >= 0 && end >= start;
+				if( opcode >= code.functions[ifun].ops.length || file >= files.length || mappings.exists(opcode)
+					|| line < 1 || !validRange ) throw "Invalid HLB opcode source span";
+				mappings.set(opcode, {sourcePath:files[file], start:start, end:end, line:line, flags:flags});
+			}
+			opcodeSourceSpans.set(ifun, mappings);
+		}
+		if( input.position != input.length ) throw "Trailing data in HLB opcode source spans";
 	}
 
 	static function readSizedString(input:haxe.io.BytesInput) {
@@ -519,7 +548,9 @@ class Module {
 		var f = code.functions[fidx];
 		var fid = f.debug[fpos << 1];
 		var fline = f.debug[(fpos << 1) + 1];
-		return { file : code.debugFiles[fid], line : fline };
+		var spans = opcodeSourceSpans.get(fidx), span = spans == null ? null : spans.get(fpos);
+		return span == null ? { file : code.debugFiles[fid], line : fline, start : -1, end : -1, flags : 0 }
+			: { file : span.sourcePath, line : span.line, start : span.start, end : span.end, flags : span.flags };
 	}
 
 	public function getFunctionRegs( fidx : Int ) {

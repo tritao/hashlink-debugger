@@ -805,10 +805,11 @@ class HLAdapter extends DebugSession {
 		for( bp in args.breakpoints ) {
 			var line = -1;
 			for( f in files ) {
-				line = dbg.checkBreakpointLine(f, bp.line);
-				if( line >= 0 ) {
+				var location = dbg.checkBreakpointLocation(f, bp.line);
+				line = location == null ? -1 : location.line;
+				if( location != null ) {
 					breakPos.get(f).push({line : line, condition : bp.condition, logMessage : bp.logMessage});
-					bps.push({ line : line, verified : true, message : null });
+					bps.push({ line : line, column : sourceColumn(args.source.path, location.start), verified : true, message : null });
 					break;
 				}
 			}
@@ -886,7 +887,7 @@ class HLAdapter extends DebugSession {
 							sourceReference : file == null ? allocValue(VUnkownFile(f.file)) : 0,
 						},
 						line : f.line,
-						column : 1
+						column : sourceColumn(file, f.start)
 					};
 				}
 			}],
@@ -901,6 +902,18 @@ class HLAdapter extends DebugSession {
 			});
 		}
 		sendResponse(response);
+	}
+
+	function sourceColumn(path:Null<String>, offset:Null<Int>):Int {
+		if( path == null || offset == null || offset < 0 ) return 1;
+		try {
+			var source = sys.io.File.getContent(path);
+			if( offset > source.length ) return 1;
+			var lineStart = source.lastIndexOf("\n", offset - 1);
+			return offset - lineStart;
+		} catch( _ : Dynamic ) {
+			return 1;
+		}
 	}
 
 	function allocValue( v ) {
