@@ -43,12 +43,17 @@ class JitInfo {
 	var functionByCodePos : Int64Map<Int>;
 	public var module(default,null) : Module;
 	var codeRanges : Array<{ start : Pointer, end : Pointer }> = [];
+	public var patchRegions(default,null) : Array<{ start : Pointer, end : Pointer, retired : Bool, functionCount : Int }> = [];
 
 	public function new() {
 	}
 
 	function get_hasThreads() {
 		return oldThreadInfos != null || flags.has(Threads);
+	}
+
+	public function getAddressRange():String {
+		return codeStart == null || codeEnd == null ? "" : codeStart.toString() + "-" + codeEnd.toString();
 	}
 
 	private function readPointer() : Pointer {
@@ -142,6 +147,7 @@ class JitInfo {
 			var functionCount = input.readInt32();
 			if( regionSize <= 0 || functionCount <= 0 ) return false;
 			codeRanges.push({ start : regionStart, end : regionStart.offset(regionSize) });
+			patchRegions.push({ start : regionStart, end : regionStart.offset(regionSize), retired : retired, functionCount : functionCount });
 			for( _ in 0...functionCount ) {
 				var functionIndex = input.readInt32();
 				if( functionIndex < 0 || functionIndex >= module.code.functions.length ) return false;
@@ -161,6 +167,12 @@ class JitInfo {
 					functions[functionIndex] = {stableId: stableId, start: start, large: large, offsets: offsets, vars: vars, sourceSpans: sourceSpans};
 					functionByCodePos.set(start.i64,functionIndex);
 				}
+			}
+			var snapshotCount = input.readInt32();
+			if( snapshotCount < 0 ) return false;
+			for( _ in 0...snapshotCount ) {
+				var sourceHash = input.readInt32(), length = input.readInt32();
+				if( length < 0 || !module.addSourceSnapshot(sourceHash, input.read(length)) ) return false;
 			}
 		}
 		applySourceSpans(this);
@@ -205,6 +217,7 @@ class JitInfo {
 				var functionCount = input.readInt32();
 				if( regionSize <= 0 || functionCount <= 0 ) return false;
 				next.codeRanges.push({ start : regionStart, end : regionStart.offset(regionSize) });
+				next.patchRegions.push({ start : regionStart, end : regionStart.offset(regionSize), retired : retired, functionCount : functionCount });
 				for( _ in 0...functionCount ) {
 					var functionIndex = input.readInt32();
 					if( functionIndex < 0 || functionIndex >= targetModule.code.functions.length ) return false;
@@ -296,6 +309,7 @@ class JitInfo {
 		out.pid = pid; out.protocolVersion = protocolVersion; out.hlVersion = hlVersion;
 		out.threads = threads; out.oldThreadInfos = oldThreadInfos; out.trampoline = trampoline;
 		out.module = module; out.moduleIdentity = identity; out.moduleRevision = revision;
+		out.patchRegions = [];
 		var previous = findModule(identity);
 		out.baseFunctions = previous == null ? null : previous.baseFunctions;
 		out.functions = out.baseFunctions == null ? [] : out.baseFunctions.copy();
@@ -320,6 +334,7 @@ class JitInfo {
 			functions = next.functions;
 			functionByCodePos = next.functionByCodePos;
 			codeRanges = next.codeRanges;
+			patchRegions = next.patchRegions;
 			return;
 		}
 		for( i in 0...debugModules.length )

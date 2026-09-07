@@ -52,6 +52,9 @@ class HLAdapter extends DebugSession {
 	var procExited : Bool;
 	var workspaceDirectory : String;
 	var classPath : Array<String>;
+	var programPath : String;
+	var moduleEventsReady : Bool;
+	var reportedModuleStates : Map<String,String>;
 
 	var debugPort : Int;
 	var doDebug : Bool;
@@ -82,6 +85,8 @@ class HLAdapter extends DebugSession {
 		debugPort = DEFAULT_PORT;
 		doDebug = true;
 		threads = new Map();
+		moduleEventsReady = false;
+		reportedModuleStates = [];
 		stepInTargetIds = [];
 		nextStepInTargetId = 1;
 		startTime = haxe.Timer.stamp();
@@ -134,6 +139,13 @@ class HLAdapter extends DebugSession {
 		response.body.supportsBreakpointLocationsRequest = true;
 		response.body.supportsStepInTargetsRequest = true;
 		response.body.supportsLoadedSourcesRequest = true;
+		response.body.supportsModulesRequest = true;
+		response.body.additionalModuleColumns = [
+			{attributeName:"revision", label:"Revision", type:cast "number"},
+			{attributeName:"activeRegions", label:"Active patches", type:cast "number"},
+			{attributeName:"retiredRegions", label:"Retired patches", type:cast "number"},
+			{attributeName:"sourceSnapshots", label:"Sources", type:cast "number"}
+		];
 
 		response.body.exceptionBreakpointFilters = [
 			{ filter : "all", label : "Stop on all exceptions" },
@@ -195,6 +207,7 @@ class HLAdapter extends DebugSession {
 			doDebug = false;
 
 		var args:Arguments = cast args;
+		programPath = args.program;
 
 		setClassPath(args.classPaths);
 		workspaceDirectory = formatDirPath(if( args.cwd == null ) haxe.io.Path.directory(args.program) else args.cwd);
@@ -219,6 +232,8 @@ class HLAdapter extends DebugSession {
 						return;
 					}
 					sendEvent(new InitializedEvent());
+					moduleEventsReady = true;
+					publishModuleEvents();
 					sendResponse(response);
 				});
 			}
@@ -310,6 +325,7 @@ class HLAdapter extends DebugSession {
 		debug("Attach");
 
 		var args:Arguments = cast args;
+		programPath = args.program;
 		setClassPath(args.classPaths);
 		workspaceDirectory = formatDirPath(args.cwd);
 		Sys.setCwd(workspaceDirectory);
@@ -320,6 +336,8 @@ class HLAdapter extends DebugSession {
 				return;
 			}
 			sendEvent(new InitializedEvent());
+			moduleEventsReady = true;
+			publishModuleEvents();
 			sendResponse(response);
 		});
 	}
@@ -487,6 +505,7 @@ class HLAdapter extends DebugSession {
 				}
 				errorMessage("Data breakpoints were cleared after hot reload; resolve and set them again.");
 			}, 0);
+			if( moduleEventsReady ) publishModuleEvents();
 		};
 
 		Sys.sleep(0.01); // make sure the process is started
@@ -1384,6 +1403,55 @@ class HLAdapter extends DebugSession {
 		sendResponse(response);
 	}
 
+	function dapModules():Array<vscode.debugProtocol.DebugProtocol.Module> {
+		var result:Array<vscode.debugProtocol.DebugProtocol.Module> = [], index = 0;
+		for( info in dbg.getModules() ) {
+			var primary = index++ == 0;
+			var item:Dynamic = {
+				id: info.id,
+				name: primary && programPath != null ? haxe.io.Path.withoutDirectory(programPath) : "HashLink module " + info.id,
+				path: primary && programPath != null ? programPath : js.Lib.undefined,
+				isOptimized: false,
+				isUserCode: true,
+				version: Std.string(info.revision),
+				symbolStatus: info.sourceSnapshots > 0 ? "Debug symbols and compiled sources loaded" : "Debug symbols loaded",
+				addressRange: info.addressRange,
+				revision: info.revision,
+				activeRegions: info.activeRegions,
+				retiredRegions: info.retiredRegions,
+				sourceSnapshots: info.sourceSnapshots
+			};
+			result.push(cast item);
+		}
+		return result;
+	}
+
+	function publishModuleEvents():Void {
+		var next:Map<String,String> = [];
+		for( item in dapModules() ) {
+			var dynamicItem:Dynamic = item;
+			var id = Std.string(item.id), state = dynamicItem.version + ":" + dynamicItem.activeRegions + ":" + dynamicItem.retiredRegions + ":" + dynamicItem.sourceSnapshots;
+			next.set(id, state);
+			var previous = reportedModuleStates.get(id);
+			if( previous == null ) sendEvent(new ModuleEvent(cast "new", cast item));
+			else if( previous != state ) sendEvent(new ModuleEvent(cast "changed", cast item));
+		}
+		for( id in reportedModuleStates.keys() )
+			if( !next.exists(id) ) sendEvent(new ModuleEvent(cast "removed", cast {id:id, name:"HashLink module " + id}));
+		reportedModuleStates = next;
+	}
+
+	function modulesRequest(response:ModulesResponse, args:ModulesArguments) {
+		var all = dapModules(), start = args.startModule == null ? 0 : args.startModule;
+		if( start < 0 ) start = 0;
+		if( start > all.length ) start = all.length;
+		var count = args.moduleCount == null || args.moduleCount == 0 ? all.length - start : args.moduleCount;
+		if( count < 0 ) count = 0;
+		var end = start + count > all.length ? all.length : start + count;
+		response.body = {modules:all.slice(start, end), totalModules:all.length};
+		sendResponse(response);
+	}
+
 	static var KEYWORDS = [for( k in [
 			// ref: haxe/src/core/ast.ml/s_keyword, without null/true/false/this
 			"function","class","static","var","if","else","while","do","for","break","return","continue","extends","implements","import","switch","case","default",
@@ -1613,6 +1681,10 @@ class HLAdapter extends DebugSession {
 	// Runtime communication with extension
 
 	override function customRequest<T>(command:String, response:vscode.debugAdapter.Messages.Response<T>, args:Dynamic):Void {
+		if( command == "modules" ) {
+			modulesRequest(cast response, cast args);
+			return;
+		}
 		// Value in response.body will be received by the extension in .then
 		var response : vscode.debugProtocol.DebugProtocol.Response<String> = cast response;
 		switch( command ) {

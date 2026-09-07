@@ -1464,6 +1464,23 @@ class Debugger {
 		return result;
 	}
 
+	public function getModules() {
+		var result = [];
+		for( owner in allJitModules() ) {
+			var active = 0, retired = 0;
+			for( region in owner.patchRegions ) if( region.retired ) retired++ else active++;
+			result.push({
+				id: owner.moduleIdentity == null ? "legacy" : owner.moduleIdentity.toString(),
+				revision: owner.moduleRevision,
+				addressRange: owner.getAddressRange(),
+				activeRegions: active,
+				retiredRegions: retired,
+				sourceSnapshots: owner.module.getSourceSnapshotCount()
+			});
+		}
+		return result;
+	}
+
 	public function addBreakpoint( file : String, line : Int, condition : Null<String>, ?column : Int ) {
 		var resolvedLine = -1;
 		var installed = false;

@@ -134,6 +134,12 @@ class Module {
 		return result;
 	}
 
+	public function getSourceSnapshotCount():Int {
+		var count = 0;
+		for( _ in sourceSnapshots ) count++;
+		return count;
+	}
+
 	public function load( data : haxe.io.Bytes ) {
 		var version = data.length > 3 ? data.get(3) : 0;
 		var readerBytes = data;
