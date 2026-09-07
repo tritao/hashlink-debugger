@@ -117,7 +117,7 @@ class HLAdapter extends DebugSession {
 		debug("Initialize");
 
 		response.body.supportsConfigurationDoneRequest = true;
-		response.body.supportsFunctionBreakpoints = false;
+		response.body.supportsFunctionBreakpoints = true;
 		response.body.supportsConditionalBreakpoints = true;
 		response.body.supportsLogPoints = true;
 		response.body.supportsEvaluateForHovers = true;
@@ -1378,8 +1378,17 @@ class HLAdapter extends DebugSession {
 	}
 
 	override function setFunctionBreakPointsRequest(response:SetFunctionBreakpointsResponse, args:SetFunctionBreakpointsArguments) {
-		debug("Unhandled request");
+		var forcePaused = dbg.stoppedThread == null;
+		if( forcePaused ) safe(() -> dbg.pause());
+		dbg.clearFunctionBreakpoints();
+		var breakpoints:Array<vscode.debugProtocol.DebugProtocol.Breakpoint> = [];
+		for( requested in args.breakpoints ) {
+			var result = dbg.addFunctionBreakpoint(requested.name, requested.condition);
+			breakpoints.push({ verified : result.verified, message : result.message });
+		}
+		response.body = { breakpoints : breakpoints };
 		sendResponse(response);
+		if( forcePaused ) shouldRun = true;
 	}
 
 	override function setDataBreakpointsRequest(response:SetDataBreakpointsResponse, args:SetDataBreakpointsArguments) {

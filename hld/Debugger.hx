@@ -85,7 +85,7 @@ class Debugger {
 	var pendingRebinds : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module }>;
 	var ignoredRoots : Map<String,Bool>;
 
-	var breakPoints : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module }>;
+	var breakPoints : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module, ?functionBreakpoint : Bool }>;
 	var nextStep(default,set): Pointer = Pointer.make(0,0);
 	var currentStack : Array<StackRawInfo>;
 	var watches : Array<WatchPoint>;
@@ -1379,6 +1379,50 @@ class Debugger {
 			}
 		}
 		return installed ? resolvedLine : -1;
+	}
+
+	public function addFunctionBreakpoint( name : String, condition : Null<String> ) : { verified : Bool, message : Null<String> } {
+		var exact = [];
+		var unqualified = [];
+		for( owner in allJitModules() )
+			for( candidate in owner.module.getNamedFunctions() ) {
+				if( candidate.name == name ) exact.push({ owner : owner, candidate : candidate });
+				if( candidate.field == name ) unqualified.push({ owner : owner, candidate : candidate });
+			}
+		var matches = exact.length > 0 ? exact : unqualified;
+		if( matches.length == 0 ) return { verified : false, message : 'Function "$name" was not found' };
+		if( exact.length == 0 && matches.length > 1 ) {
+			var names = [for( match in matches ) match.candidate.name];
+			names.sort(Reflect.compare);
+			return { verified : false, message : 'Function "$name" is ambiguous: ' + names.join(", ") };
+		}
+		var installed = false;
+		var sourceConflict = false;
+		for( match in matches ) {
+			var owner = match.owner;
+			var candidate = match.candidate;
+			if( !owner.hasFunction(candidate.ifun) || owner.module.code.functions[candidate.ifun].debug.length == 0 ) continue;
+			var codePos = owner.getCodePos(candidate.ifun, 0);
+			var existing = Lambda.find(breakPoints, bp -> bp.jit == owner && bp.fid == candidate.ifun && bp.pos == 0);
+			if( existing != null ) {
+				if( existing.functionBreakpoint == true ) installed = true;
+				else sourceConflict = true;
+				continue;
+			}
+			var old = getAsm(codePos);
+			setAsm(codePos, INT3);
+			breakPoints.push({ fid : candidate.ifun, pos : 0, oldByte : old, codePos : codePos, condition : condition, jit : owner, module : owner.module, functionBreakpoint : true });
+			DebugTrace.write("debugger", "function_breakpoint_installed", { name : candidate.name, functionId : candidate.ifun, address : codePos.toString(), oldByte : old });
+			installed = true;
+		}
+		if( !installed && sourceConflict )
+			return { verified : false, message : 'Function "$name" conflicts with a source breakpoint at its entry' };
+		return installed ? { verified : true, message : null } : { verified : false, message : 'Function "$name" has no executable debug mapping' };
+	}
+
+	public function clearFunctionBreakpoints() {
+		for( bp in breakPoints.copy() )
+			if( bp.functionBreakpoint == true ) removeBP(bp);
 	}
 
 	function allJitModules():Array<JitInfo> return [jit].concat(jit.debugModules);

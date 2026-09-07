@@ -58,6 +58,18 @@ class Module {
 		return methods[f.findex];
 	}
 
+	public function getNamedFunctions() : Array<{ name : String, field : String, ifun : Int }> {
+		var result = [];
+		for( ifun in 0...code.functions.length ) {
+			var context = getMethodContext(ifun);
+			if( context == null ) continue;
+			var objectName = context.obj.name.split("$").join("");
+			var field = context.field == "__constructor__" ? "new" : context.field;
+			result.push({ name : objectName + "." + field, field : field, ifun : ifun });
+		}
+		return result;
+	}
+
 	public function load( data : haxe.io.Bytes ) {
 		code = new format.hl.Reader().read(new haxe.io.BytesInput(data));
 
