@@ -27,6 +27,12 @@ typedef ActiveDataBreakpoint = {
 	var watch : hld.Debugger.WatchPoint;
 }
 
+typedef SourceBreakpoint = {
+	var line : Int;
+	var condition : Null<String>;
+	var logMessage : Null<String>;
+}
+
 class HLAdapter extends DebugSession {
 
 	static var UID = 0;
@@ -54,7 +60,7 @@ class HLAdapter extends DebugSession {
 	var dataBreakpointGeneration : Int;
 	var nextDataBreakpointId : Int;
 	var dataBreakpointHandles : Map<String,DataBreakpointHandle>;
-	var breakPos : Map<String, Array<{ line : Int, condition : String }>>;
+	var breakPos : Map<String, Array<SourceBreakpoint>>;
 	var activeDataBreakpoints : Array<ActiveDataBreakpoint>;
 	var retiringDataBreakpoints : Array<ActiveDataBreakpoint>;
 	var isPause : Bool;
@@ -113,6 +119,7 @@ class HLAdapter extends DebugSession {
 		response.body.supportsConfigurationDoneRequest = true;
 		response.body.supportsFunctionBreakpoints = false;
 		response.body.supportsConditionalBreakpoints = true;
+		response.body.supportsLogPoints = true;
 		response.body.supportsEvaluateForHovers = true;
 		response.body.supportsStepBack = false;
 		response.body.supportsSetVariable = true;
@@ -589,6 +596,11 @@ class HLAdapter extends DebugSession {
 		case Breakpoint, Watchbreak:
 			//debug("Thread " + dbg.currentThread + " paused " + frameStr(dbg.getStackFrame()));
 			var hasException = dbg.hasException();
+			if( msg == Breakpoint && !hasException && !isPause && handleLogpoint() ) {
+				shouldRun = true;
+				isPause = false;
+				return;
+			}
 			var exc = dbg.getException();
 			var str = null;
 			if( exc != null ) {
@@ -646,6 +658,87 @@ class HLAdapter extends DebugSession {
 			errorMessage("??? "+msg);
 		}
 		isPause = false;
+	}
+
+	function handleLogpoint() : Bool {
+		if( !dbg.hasStack() ) return false;
+		var frame = dbg.getStackFrame();
+		for( file => points in breakPos ) {
+			if( !sameSourceFile(file, frame.file) ) continue;
+			for( point in points )
+				if( point.line == frame.line && point.logMessage != null ) {
+					sendEvent(new OutputEvent(formatLogMessage(point.logMessage) + "\n", Console));
+					return true;
+				}
+		}
+		return false;
+	}
+
+	function sameSourceFile( first : String, second : String ) : Bool {
+		first = first.split("\\").join("/").toLowerCase();
+		second = second.split("\\").join("/").toLowerCase();
+		return first == second || StringTools.endsWith(first, "/" + second) || StringTools.endsWith(second, "/" + first);
+	}
+
+	function formatLogMessage( message : String ) : String {
+		var output = new StringBuf();
+		var pos = 0;
+		while( pos < message.length ) {
+			var code = message.charCodeAt(pos);
+			if( code == '{'.code && pos + 1 < message.length && message.charCodeAt(pos + 1) == '{'.code ) {
+				output.add("{");
+				pos += 2;
+				continue;
+			}
+			if( code == '}'.code && pos + 1 < message.length && message.charCodeAt(pos + 1) == '}'.code ) {
+				output.add("}");
+				pos += 2;
+				continue;
+			}
+			if( code != '{'.code ) {
+				output.addChar(code);
+				pos++;
+				continue;
+			}
+			var end = findLogExpressionEnd(message, pos + 1);
+			if( end < 0 ) {
+				output.add(message.substr(pos));
+				break;
+			}
+			var expression = StringTools.trim(message.substring(pos + 1, end));
+			if( expression == "" )
+				output.add("{}");
+			else try {
+				var value = dbg.getValue(expression);
+				output.add(value == null ? "null" : dbg.eval.valueStr(value));
+			} catch( e : Dynamic ) {
+				output.add("<error: " + Std.string(e) + ">");
+			}
+			pos = end + 1;
+		}
+		return output.toString();
+	}
+
+	function findLogExpressionEnd( message : String, start : Int ) : Int {
+		var depth = 1;
+		var quote = -1;
+		var escaped = false;
+		for( pos in start...message.length ) {
+			var code = message.charCodeAt(pos);
+			if( quote >= 0 ) {
+				if( escaped ) escaped = false;
+				else if( code == '\\'.code ) escaped = true;
+				else if( code == quote ) quote = -1;
+				continue;
+			}
+			if( code == '"'.code || code == '\''.code ) {
+				quote = code;
+				continue;
+			}
+			if( code == '{'.code ) depth++;
+			else if( code == '}'.code && --depth == 0 ) return pos;
+		}
+		return -1;
 	}
 
 	function discardStaleDataBreakpoint() {
@@ -714,7 +807,7 @@ class HLAdapter extends DebugSession {
 			for( f in files ) {
 				line = dbg.checkBreakpointLine(f, bp.line);
 				if( line >= 0 ) {
-					breakPos.get(f).push({line : line, condition : bp.condition});
+					breakPos.get(f).push({line : line, condition : bp.condition, logMessage : bp.logMessage});
 					bps.push({ line : line, verified : true, message : null });
 					break;
 				}
