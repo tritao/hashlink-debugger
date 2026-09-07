@@ -15,6 +15,18 @@ enum VarValue {
 	VStack( stack : Array<hld.Debugger.StackInfo> );
 }
 
+typedef DataBreakpointHandle = {
+	var id : String;
+	var address : hld.Debugger.Address;
+	var ownerThread : Null<Int>;
+	var ownerFrame : Null<hld.Pointer>;
+}
+
+typedef ActiveDataBreakpoint = {
+	var handle : DataBreakpointHandle;
+	var watch : hld.Debugger.WatchPoint;
+}
+
 class HLAdapter extends DebugSession {
 
 	static var UID = 0;
@@ -39,9 +51,12 @@ class HLAdapter extends DebugSession {
 	var shouldRun : Bool;
 
 	var varsValues : Map<Int,VarValue>;
-	var ptrValues : Array<hld.Debugger.Address>;
+	var dataBreakpointGeneration : Int;
+	var nextDataBreakpointId : Int;
+	var dataBreakpointHandles : Map<String,DataBreakpointHandle>;
 	var breakPos : Map<String, Array<{ line : Int, condition : String }>>;
-	var watchedPtrs : Array<hld.Debugger.WatchPoint>;
+	var activeDataBreakpoints : Array<ActiveDataBreakpoint>;
+	var retiringDataBreakpoints : Array<ActiveDataBreakpoint>;
 	var isPause : Bool;
 	var threads : Map<Int,Bool>;
 	var allowEvalGetters : Bool;
@@ -58,9 +73,12 @@ class HLAdapter extends DebugSession {
 		doDebug = true;
 		threads = new Map();
 		startTime = haxe.Timer.stamp();
-		ptrValues = [];
+		dataBreakpointGeneration = 1;
+		nextDataBreakpointId = 0;
+		dataBreakpointHandles = new Map();
 		breakPos = [];
-		watchedPtrs = [];
+		activeDataBreakpoints = [];
+		retiringDataBreakpoints = [];
 		inst = this;
 		shouldRun = false;
 		procExited = false;
@@ -381,13 +399,20 @@ class HLAdapter extends DebugSession {
 	function startDebug( program : String, port : Int, onError : String -> Void ) {
 		dbg = new hld.Debugger();
 		dbg.onDebugMappingsChanged = function() {
-			var hadWatches = watchedPtrs.length > 0;
-			for( watch in watchedPtrs )
-				dbg.unwatch(watch.addr);
-			watchedPtrs = [];
-			ptrValues = [];
-			if( hadWatches )
+			var hadWatches = activeDataBreakpoints.length > 0;
+			var invalidated = activeDataBreakpoints;
+			activeDataBreakpoints = [];
+			retiringDataBreakpoints = retiringDataBreakpoints.concat(invalidated);
+			dataBreakpointHandles = new Map();
+			dataBreakpointGeneration++;
+			if( hadWatches ) haxe.Timer.delay(function() {
+				if( dbg == null ) return;
+				for( active in invalidated ) {
+					dbg.unwatch(active.watch.addr);
+					retiringDataBreakpoints.remove(active);
+				}
 				errorMessage("Data breakpoints were cleared after hot reload; resolve and set them again.");
+			}, 0);
 		};
 
 		Sys.sleep(0.01); // make sure the process is started
@@ -538,6 +563,10 @@ class HLAdapter extends DebugSession {
 	}
 
 	function handleWait( msg : hld.Api.WaitResult ) {
+		if( msg == Watchbreak && discardStaleDataBreakpoint() ) {
+			isPause = false;
+			return;
+		}
 		switch( msg ) {
 		case Breakpoint, Watchbreak:
 			//debug("Thread " + dbg.currentThread + " paused " + frameStr(dbg.getStackFrame()));
@@ -596,6 +625,38 @@ class HLAdapter extends DebugSession {
 			errorMessage("??? "+msg);
 		}
 		isPause = false;
+	}
+
+	function discardStaleDataBreakpoint() {
+		var address = dbg.watchBreak;
+		if( address == null ) return false;
+		for( active in retiringDataBreakpoints )
+			if( active.handle.address.ptr.i64 == address.ptr.i64 ) {
+				dbg.unwatch(active.watch.addr);
+				retiringDataBreakpoints.remove(active);
+				dbg.resume();
+				return true;
+			}
+		for( active in activeDataBreakpoints ) {
+			var handle = active.handle;
+			if( handle.address.ptr.i64 != address.ptr.i64 || handle.ownerFrame == null ) continue;
+			var ownerAlive = dbg.currentThread == handle.ownerThread;
+			if( ownerAlive ) {
+				ownerAlive = false;
+				for( frame in dbg.getBackTrace() )
+					if( frame.ebp != null && frame.ebp.i64 == handle.ownerFrame.i64 ) {
+						ownerAlive = true;
+						break;
+					}
+			}
+			if( ownerAlive ) return false;
+			debug("Discard stale local data breakpoint "+handle.id);
+			dbg.unwatch(active.watch.addr);
+			activeDataBreakpoints.remove(active);
+			dbg.resume();
+			return true;
+		}
+		return false;
 	}
 
 	function beforeStop() {
@@ -734,12 +795,14 @@ class HLAdapter extends DebugSession {
 		return id;
 	}
 
-	function allocPtr( a : hld.Debugger.Address ) {
-		for( i => p in ptrValues )
-			if( p != null && p.ptr.i64 == a.ptr.i64 )
-				return i + 1;
-		ptrValues.push(a);
-		return ptrValues.length;
+	function allocDataBreakpoint( address : hld.Debugger.Address, ownerThread : Null<Int>, ownerFrame : Null<hld.Pointer> ) {
+		for( handle in dataBreakpointHandles )
+			if( handle.address.ptr.i64 == address.ptr.i64 && handle.ownerThread == ownerThread
+				&& (handle.ownerFrame == null ? ownerFrame == null : ownerFrame != null && handle.ownerFrame.i64 == ownerFrame.i64) )
+				return handle.id;
+		var id = dataBreakpointGeneration+":"+(++nextDataBreakpointId);
+		dataBreakpointHandles.set(id, { id : id, address : address, ownerThread : ownerThread, ownerFrame : ownerFrame });
+		return id;
 	}
 
 	override function scopesRequest(response:ScopesResponse, args:ScopesArguments) {
@@ -1207,43 +1270,44 @@ class HLAdapter extends DebugSession {
 
 	override function setDataBreakpointsRequest(response:SetDataBreakpointsResponse, args:SetDataBreakpointsArguments) {
 		//debug("SetDataBreakpoints request");
-		var current = watchedPtrs.copy();
+		var current = activeDataBreakpoints.copy();
 		var results:Array<vscode.debugProtocol.DebugProtocol.Breakpoint> = [];
 		for( a in args.breakpoints ) {
 			if( a.dataId == null ) {
 				results.push({ verified : false, message : "Missing data breakpoint identifier" });
 				continue;
 			}
-			var ptr = ptrValues[(cast a.dataId:Int) - 1];
-			if( ptr == null ) {
+			var handle = dataBreakpointHandles.get(a.dataId);
+			if( handle == null ) {
 				results.push({ verified : false, message : "Data breakpoint identifier is no longer valid" });
 				continue;
 			}
-			for( w in current ) {
-				if( w.addr.ptr.i64 == ptr.ptr.i64 ) {
-					current.remove(w);
-					ptr = null;
+			var alreadyActive = false;
+			for( active in current ) {
+				if( active.handle.id == handle.id ) {
+					current.remove(active);
+					alreadyActive = true;
 					break;
 				}
 			}
-			if( ptr == null ) {
+			if( alreadyActive ) {
 				results.push({ verified : true });
 				continue;
 			}
 			try {
-				var w = dbg.watch(ptr);
-				debug("WATCHING "+ptr.ptr.toString()+":"+dbg.eval.typeStr(ptr.t));
-				watchedPtrs.push(w);
+				var watch = dbg.watch(handle.address);
+				debug("WATCHING "+handle.address.ptr.toString()+":"+dbg.eval.typeStr(handle.address.t));
+				activeDataBreakpoints.push({ handle : handle, watch : watch });
 				results.push({ verified : true });
 			} catch( e : Dynamic ) {
 				errorMessage(""+e);
 				results.push({ verified : false, message : Std.string(e) });
 			}
 		}
-		for( w in current ) {
-			debug("UNWATCH "+w.addr.ptr.toString());
-			watchedPtrs.remove(w);
-			dbg.unwatch(w.addr);
+		for( active in current ) {
+			debug("UNWATCH "+active.watch.addr.ptr.toString());
+			activeDataBreakpoints.remove(active);
+			dbg.unwatch(active.watch.addr);
 		}
 		response.body = { breakpoints : results };
 		sendResponse(response);
@@ -1275,13 +1339,18 @@ class HLAdapter extends DebugSession {
 		try {
 			var ptr = getVarAddress(args.variablesReference, args.name);
 			if( ptr != null ) {
+				var ownerThread : Null<Int> = null;
+				var ownerFrame : Null<hld.Pointer> = null;
 				var desc = switch( varsValues.get(args.variablesReference) ) {
-				case VScope(_): "local "+args.name;
+				case VScope(frame):
+					ownerThread = dbg.currentThread;
+					ownerFrame = dbg.getStackFrame(frame).ebp;
+					"local "+args.name;
 				case VValue({v : VArray(_)}, _): "["+args.name+"]";
 				default: "field "+args.name;
 				}
 				response.body = {
-					dataId : cast allocPtr(ptr),
+					dataId : allocDataBreakpoint(ptr, ownerThread, ownerFrame),
 					description : "Write "+desc+":"+ptr.ptr.toString(),
 					accessTypes : [Write],
 				};
