@@ -43,6 +43,8 @@ class HLAdapter extends DebugSession {
 	public static var CONNECTION_TIMEOUT : Float = 10;
 
 	var isSessionActive(default, set) : Bool;
+	var stepInTargetIds:Map<Int,Int>;
+	var nextStepInTargetId:Int;
 	var breakOnlyActive(default, set) : Bool;
 
 	var proc : ChildProcessObject;
@@ -79,6 +81,8 @@ class HLAdapter extends DebugSession {
 		debugPort = DEFAULT_PORT;
 		doDebug = true;
 		threads = new Map();
+		stepInTargetIds = [];
+		nextStepInTargetId = 1;
 		startTime = haxe.Timer.stamp();
 		dataBreakpointGeneration = 1;
 		nextDataBreakpointId = 0;
@@ -127,6 +131,7 @@ class HLAdapter extends DebugSession {
 		response.body.supportsDataBreakpoints = true;
 		response.body.supportsExceptionInfoRequest = true;
 		response.body.supportsBreakpointLocationsRequest = true;
+		response.body.supportsStepInTargetsRequest = true;
 
 		response.body.exceptionBreakpointFilters = [
 			{ filter : "all", label : "Stop on all exceptions" },
@@ -1327,7 +1332,9 @@ class HLAdapter extends DebugSession {
 		debug("StepIn");
 		sendResponse(response);
 		setThread(args.threadId);
-		safe(() -> handleWait(dbg.step(Into)));
+		var targetPos = args.targetId == null ? null : stepInTargetIds.get(args.targetId);
+		stepInTargetIds = [];
+		safe(() -> handleWait(targetPos == null ? dbg.step(Into) : dbg.stepIntoTarget(targetPos)));
 	}
 
 	override function stepOutRequest(response:StepOutResponse, args:StepOutArguments) {
@@ -1554,7 +1561,17 @@ class HLAdapter extends DebugSession {
 	override function stepBackRequest(response:StepBackResponse, args:StepBackArguments) { debug("Unhandled request"); }
 	override function restartFrameRequest(response:RestartFrameResponse, args:RestartFrameArguments) { debug("Unhandled request"); }
 	override function gotoRequest(response:GotoResponse, args:GotoArguments) { debug("Unhandled request"); }
-	override function stepInTargetsRequest(response:StepInTargetsResponse, args:StepInTargetsArguments) { debug("Unhandled request"); }
+	override function stepInTargetsRequest(response:StepInTargetsResponse, args:StepInTargetsArguments) {
+		stepInTargetIds = [];
+		var targets:Array<StepInTarget> = [];
+		for( target in dbg.getStepInTargets(args.frameId) ) {
+			var id = nextStepInTargetId++;
+			stepInTargetIds.set(id, target.pos);
+			targets.push({id:id, label:target.label});
+		}
+		response.body = {targets:targets};
+		sendResponse(response);
+	}
 	override function gotoTargetsRequest(responses:GotoTargetsResponse, args:GotoTargetsArguments) { debug("Unhandled request"); }
 	override function completionsRequest(response:CompletionsResponse, args:CompletionsArguments) { debug("Unhandled request"); }
 	override function setExpressionRequest(response:SetExpressionResponse, args:SetExpressionArguments) { debug("Unhandled request"); }

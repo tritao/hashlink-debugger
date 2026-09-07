@@ -92,6 +92,13 @@ class Module {
 		return null;
 	}
 
+	public function getFunctionDisplayName(ifun:Int):String {
+		for( identity in functionIdentities ) if( identity.ifun == ifun ) return identity.displayName;
+		var context = getMethodContext(ifun);
+		if( context != null ) return context.obj.name.split("$").join("") + "." + (context.field == "__constructor__" ? "new" : context.field);
+		return "function " + code.functions[ifun].findex;
+	}
+
 	public function replaceOpcodeSourceSpans(ifun:Int, spans:Array<{file:String, line:Int, column:Int, endLine:Int, endColumn:Int, sourceHash:Int, start:Int, end:Int, flags:Int}>):Void {
 		var mappings:Map<Int,OpcodeSourceSpan> = [];
 		for( opcode in 0...spans.length ) {

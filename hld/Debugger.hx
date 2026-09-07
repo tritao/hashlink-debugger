@@ -767,9 +767,10 @@ class Debugger {
 		eval.nativeBreak = brk == null && stoppedThread != null && jit.resolveAsmPos(getCodePos(currentThread)) == null;
 	}
 
-	function skipFunction( fidx : Int ) {
-		var ctx = module.getMethodContext(fidx);
-		var name = ctx == null ? new haxe.io.Path(module.resolveSymbol(fidx, 0).file).file : ctx.obj.name.split(".")[0];
+	function skipFunction( fidx : Int, ?owner : Module ) {
+		if( owner == null ) owner = module;
+		var ctx = owner.getMethodContext(fidx);
+		var name = ctx == null ? new haxe.io.Path(owner.resolveSymbol(fidx, 0).file).file : ctx.obj.name.split(".")[0];
 		if( name.charCodeAt(0) == "$".code ) name = name.substr(1);
 		if( ignoredRoots == null ) {
 			ignoredRoots = new Map();
@@ -779,7 +780,45 @@ class Debugger {
 		return ignoredRoots.exists(name);
 	}
 
-	public function step( mode : StepMode ) : Api.WaitResult {
+	public function getStepInTargets(frame:Int = 0) {
+		if( frame != 0 ) return [];
+		var s = currentStack[frame];
+		if( s == null || s.fidx == Eval.TRAMPOLINE_FIDX ) return [];
+		var owner = s.module == null ? module : s.module;
+		var graph = owner.getGraph(s.fidx), origin = owner.resolveSymbol(s.fidx, s.fpos);
+		var todo = [s.fpos], seen = new Map<Int,Bool>(), targets = [];
+		while( todo.length > 0 ) {
+			var pos = todo.pop();
+			if( seen.exists(pos) ) continue;
+			seen.set(pos, true);
+			var symbol = owner.resolveSymbol(s.fidx, pos);
+			if( pos != s.fpos && ((symbol.flags & 1) != 0 || symbol.file != origin.file || symbol.line != origin.line) ) continue;
+			switch( graph.control(pos) ) {
+			case CCall(findex):
+				var label = "dynamic call";
+				if( findex >= 0 ) {
+					var target = @:privateAccess owner.functionsIndexes.get(findex);
+					if( target == null || target >= owner.code.functions.length || skipFunction(target, owner) ) {
+						for( next in graph.getNextPos(pos) ) todo.push(next);
+						continue;
+					}
+					label = owner.getFunctionDisplayName(target);
+				}
+				targets.push({pos:pos, label:label + " at " + symbol.line + ":" + symbol.column});
+			default:
+			}
+			for( next in graph.getNextPos(pos) ) todo.push(next);
+		}
+		targets.sort(function(a, b) return a.pos - b.pos);
+		return targets;
+	}
+
+	public function stepIntoTarget(pos:Int):Api.WaitResult {
+		for( target in getStepInTargets() ) if( target.pos == pos ) return step(Into, pos);
+		return step(Next);
+	}
+
+	public function step( mode : StepMode, ?targetPos:Int ) : Api.WaitResult {
 		var tid = currentThread;
 		var s = currentStack[0];
 		var depth = currentStack.length;
@@ -829,7 +868,7 @@ class Debugger {
 			var hasSpans = orig.start >= 0 && l.start >= 0;
 			var sourceChange = mode == Into && hasSpans ? l.file != orig.file || l.sourceHash != orig.sourceHash || l.start != orig.start || l.end != orig.end
 				: l.file != orig.file || l.line != orig.line;
-			var lineChange = mode != Out && (l.flags & 1) == 0 && sourceChange && !c.match(CCatch | CJAlways(_));
+			var lineChange = targetPos == null && mode != Out && (l.flags & 1) == 0 && sourceChange && !c.match(CCatch | CJAlways(_));
 			switch( c ) {
 			case CCall(f) if( f >= 0 && mode == Into ):
 				// skip calls to std library
@@ -838,6 +877,7 @@ class Debugger {
 					c = CNo;
 			default:
 			}
+			if( targetPos != null && c.match(CCall(_)) && pos != targetPos ) c = CNo;
 			if( lineChange || c == CRet || (mode == Into && c.match(CCall(_))) ) {
 				var codePos = jit.getCodePos(s.fidx, pos);
 				var old = getAsm(codePos);
