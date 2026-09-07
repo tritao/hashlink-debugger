@@ -225,6 +225,12 @@ class JitInfo {
 						next.functionByCodePos.set(start.i64, functionIndex);
 					}
 				}
+				var snapshotCount = input.readInt32();
+				if( snapshotCount < 0 ) return false;
+				for( _ in 0...snapshotCount ) {
+					var sourceHash = input.readInt32(), length = input.readInt32();
+					if( length < 0 || !targetModule.addSourceSnapshot(sourceHash, input.read(length)) ) return false;
+				}
 			}
 			parsed.push(next);
 			if( next.codeRanges.length > 0 ) {

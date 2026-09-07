@@ -1444,6 +1444,26 @@ class Debugger {
 		return result;
 	}
 
+	public function getSourceSnapshot(sourceHash:Int):Null<haxe.io.Bytes> {
+		for( owner in allJitModules() ) {
+			var content = owner.module.getSourceSnapshot(sourceHash);
+			if( content != null ) return content;
+		}
+		return null;
+	}
+
+	public function getLoadedSourceSnapshots() {
+		var result = [], seen = new Map<String,Bool>();
+		for( owner in allJitModules() )
+			for( source in owner.module.getLoadedSourceSnapshots() ) {
+				var key = source.path + ":" + source.sourceHash;
+				if( seen.exists(key) ) continue;
+				seen.set(key, true);
+				result.push(source);
+			}
+		return result;
+	}
+
 	public function addBreakpoint( file : String, line : Int, condition : Null<String>, ?column : Int ) {
 		var resolvedLine = -1;
 		var installed = false;

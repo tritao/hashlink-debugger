@@ -10,6 +10,7 @@ enum VarValue {
 	VScope( k : Int );
 	VValue( v : hld.Value, evalName : String );
 	VUnkownFile( file : String );
+	VCompiledSource( content : haxe.io.Bytes );
 	VObjFields( v : hld.Value, o : format.hl.Data.ObjPrototype, evalName : String );
 	VStatics( cl : String );
 	VStack( stack : Array<hld.Debugger.StackInfo> );
@@ -132,6 +133,7 @@ class HLAdapter extends DebugSession {
 		response.body.supportsExceptionInfoRequest = true;
 		response.body.supportsBreakpointLocationsRequest = true;
 		response.body.supportsStepInTargetsRequest = true;
+		response.body.supportsLoadedSourcesRequest = true;
 
 		response.body.exceptionBreakpointFilters = [
 			{ filter : "all", label : "Stop on all exceptions" },
@@ -942,14 +944,16 @@ class HLAdapter extends DebugSession {
 				} else {
 					var file = getFilePath(f.file);
 					var stale = file != null && !sourceSnapshotMatches(file, f.sourceHash);
+					var compiled = dbg.getSourceSnapshot(f.sourceHash);
+					var sourceReference = compiled != null && (file == null || stale) ? allocValue(VCompiledSource(compiled)) : 0;
 					{
 						id : start + i,
 						name : stackStr(f),
 						source : {
 							name : f.file.split("/").pop(),
 							path : file == null ? js.Lib.undefined : (isWindows ? file.split("/").join("\\") : file),
-							sourceReference : file == null ? allocValue(VUnkownFile(f.file)) : 0,
-							origin : stale ? staleSourceMessage(file) : js.Lib.undefined,
+							sourceReference : sourceReference != 0 ? sourceReference : (file == null ? allocValue(VUnkownFile(f.file)) : 0),
+							origin : stale ? staleSourceMessage(file) : (file == null && compiled != null ? "compiled source snapshot" : js.Lib.undefined),
 							presentationHint : stale ? cast "deemphasize" : js.Lib.undefined,
 						},
 						line : f.line,
@@ -1278,7 +1282,7 @@ class HLAdapter extends DebugSession {
 					variablesReference: 0,
 				});
 			}
-		case VUnkownFile(_):
+		case VUnkownFile(_), VCompiledSource(_):
 			throw "assert";
 		}
 		sendResponse(response);
@@ -1353,12 +1357,31 @@ class HLAdapter extends DebugSession {
 
 	override function sourceRequest(response:SourceResponse, args:SourceArguments) {
 		switch( varsValues.get(args.sourceReference) ) {
+		case VCompiledSource(content):
+			response.body = { content : content.toString(), mimeType : "text/x-haxe" };
+			sendResponse(response);
 		case VUnkownFile(file):
 			response.body = { content : "Unknown file " + file };
 			sendResponse(response);
 		default:
 			throw "assert";
 		}
+	}
+
+	override function loadedSourcesRequest(response:LoadedSourcesResponse, args:LoadedSourcesArguments) {
+		var sources:Array<vscode.debugProtocol.DebugProtocol.Source> = [];
+		for( source in dbg.getLoadedSourceSnapshots() ) {
+			var file = getFilePath(source.path), stale = file != null && !sourceSnapshotMatches(file, source.sourceHash);
+			sources.push({
+				name : Std.string(source.path.split("/").pop()),
+				path : file == null ? js.Lib.undefined : (isWindows ? file.split("/").join("\\") : file),
+				sourceReference : file != null && !stale ? 0 : allocValue(VCompiledSource(source.content)),
+				origin : file == null ? "compiled source snapshot" : (stale ? staleSourceMessage(file) : js.Lib.undefined),
+				presentationHint : stale ? cast "deemphasize" : js.Lib.undefined
+			});
+		}
+		response.body = {sources:sources};
+		sendResponse(response);
 	}
 
 	static var KEYWORDS = [for( k in [

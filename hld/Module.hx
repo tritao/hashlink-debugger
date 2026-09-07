@@ -42,6 +42,7 @@ class Module {
 	var methods : Array<{ obj : ObjPrototype, field : String }>;
 	var functionIdentities : Array<{ stableId : Int, name : String, displayName : String, ifun : Int, sourcePath : String, start : Int, end : Int, line : Int, flags : Int }>;
 	var opcodeSourceSpans : Map<Int,Map<Int,OpcodeSourceSpan>>;
+	var sourceSnapshots : Map<Int,haxe.io.Bytes>;
 	var functionsIndexes : Map<Int,Int>;
 	var isWindows : Bool;
 	var closureContextId : Int = 0;
@@ -55,6 +56,7 @@ class Module {
 		methods = [];
 		functionIdentities = [];
 		opcodeSourceSpans = [];
+		sourceSnapshots = [];
 		isWindows = Sys.systemName() == "Windows";
 	}
 
@@ -107,6 +109,29 @@ class Module {
 				sourceHash:span.sourceHash, start:span.start, end:span.end, flags:span.flags});
 		}
 		opcodeSourceSpans.set(ifun, mappings);
+	}
+
+	public function addSourceSnapshot(sourceHash:Int, content:haxe.io.Bytes):Bool {
+		if( sourceHash == 0 || hashSource(content) != sourceHash ) return false;
+		var existing = sourceSnapshots.get(sourceHash);
+		if( existing != null && existing.compare(content) != 0 ) return false;
+		sourceSnapshots.set(sourceHash, content);
+		return true;
+	}
+
+	public function getSourceSnapshot(sourceHash:Int):Null<haxe.io.Bytes>
+		return sourceSnapshots.get(sourceHash);
+
+	public function getLoadedSourceSnapshots() {
+		var result = [], seen = new Map<String,Bool>();
+		for( mappings in opcodeSourceSpans )
+			for( span in mappings ) {
+				var content = sourceSnapshots.get(span.sourceHash), key = span.sourcePath + ":" + span.sourceHash;
+				if( content == null || seen.exists(key) ) continue;
+				seen.set(key, true);
+				result.push({path:span.sourcePath, sourceHash:span.sourceHash, content:content});
+			}
+		return result;
 	}
 
 	public function load( data : haxe.io.Bytes ) {
@@ -195,6 +220,23 @@ class Module {
 		if( input.position != data.length ) throw "Trailing data after HLB debug sections";
 		for( section in sections ) if( section.kind == 1 && section.version == 1 ) readFunctionIdentities(section.payload);
 		for( section in sections ) if( section.kind == 2 && section.version == 2 ) readOpcodeSourceSpans(section.payload);
+		for( section in sections ) if( section.kind == 3 && section.version == 1 ) readSourceSnapshots(section.payload);
+	}
+
+	function readSourceSnapshots(bytes:haxe.io.Bytes) {
+		var input = new haxe.io.BytesInput(bytes), seen = new Map<Int,Bool>();
+		for( _ in 0...readUnsignedIndex(input) ) {
+			var sourceHash = input.readInt32(), content = input.read(readUnsignedIndex(input));
+			if( seen.exists(sourceHash) || !addSourceSnapshot(sourceHash, content) ) throw "Invalid HLB source snapshot";
+			seen.set(sourceHash, true);
+		}
+		if( input.position != input.length ) throw "Trailing data in HLB source snapshots";
+	}
+
+	static function hashSource(bytes:haxe.io.Bytes):Int {
+		var hash:Int = cast 0x811C9DC5;
+		for( index in 0...bytes.length ) hash = js.Syntax.code("Math.imul({0}, 16777619)", hash ^ bytes.get(index));
+		return hash;
 	}
 
 	function readFunctionIdentities(bytes:haxe.io.Bytes) {
