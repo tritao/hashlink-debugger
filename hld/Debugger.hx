@@ -1391,7 +1391,8 @@ class Debugger {
 				var key = location.line + ":" + location.column + ":" + location.endLine + ":" + location.endColumn;
 				if( seen.exists(key) ) continue;
 				seen.set(key, true);
-				result.push({line:location.line, column:location.column, endLine:location.endLine, endColumn:location.endColumn});
+				result.push({line:location.line, column:location.column, endLine:location.endLine, endColumn:location.endColumn,
+					sourceHash:location.sourceHash});
 			}
 		}
 		result.sort(function(a, b) {

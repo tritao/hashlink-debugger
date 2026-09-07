@@ -138,12 +138,13 @@ class HLAdapter extends DebugSession {
 
 	override function breakpointLocationsRequest(response:BreakpointLocationsResponse, args:BreakpointLocationsArguments):Void {
 		var locations:Array<BreakpointLocation> = [];
-		if( args.source.path != null )
+		if( args.source.path != null && sys.FileSystem.exists(args.source.path) )
 			for( file in getLocalFiles(args.source.path) )
 				for( location in dbg.getBreakpointLocations(file, args.line, args.column, args.endLine, args.endColumn) )
-					if( !Lambda.exists(locations, function(existing) return existing.line == location.line && existing.column == location.column
+					if( sourceSnapshotMatches(args.source.path, location.sourceHash)
+						&& !Lambda.exists(locations, function(existing) return existing.line == location.line && existing.column == location.column
 						&& existing.endLine == location.endLine && existing.endColumn == location.endColumn) )
-						locations.push(location);
+						locations.push({line:location.line, column:location.column, endLine:location.endLine, endColumn:location.endColumn});
 		locations.sort(function(a, b) {
 			if( a.line != b.line ) return a.line - b.line;
 			if( a.column != b.column ) return a.column - b.column;
@@ -153,6 +154,27 @@ class HLAdapter extends DebugSession {
 		response.body = { breakpoints : locations };
 		sendResponse(response);
 	}
+
+	function sourceContentHash(path:String):Null<Int> {
+		try {
+			var bytes = sys.io.File.getBytes(path);
+			var hash:Int = cast 0x811C9DC5;
+			for( index in 0...bytes.length )
+				hash = js.Syntax.code("Math.imul({0}, 16777619)", hash ^ bytes.get(index));
+			return hash;
+		} catch( _ : Dynamic ) {
+			return null;
+		}
+	}
+
+	inline function sourceSnapshotMatches(path:String, expectedHash:Int):Bool {
+		if( expectedHash == 0 ) return true;
+		var actualHash = sourceContentHash(path);
+		return actualHash != null && actualHash == expectedHash;
+	}
+
+	inline function staleSourceMessage(path:String):String
+		return 'Source differs from the compiled snapshot: $path';
 
 	function debug(v:Dynamic, ?pos:haxe.PosInfos) {
 		if( DEBUG ) haxe.Log.trace(v, pos);
@@ -824,18 +846,26 @@ class HLAdapter extends DebugSession {
 		response.body = { breakpoints : bps };
 		for( bp in args.breakpoints ) {
 			var line = -1;
+			var stale = false;
+			var accepted = false;
 			for( f in files ) {
 				var location = dbg.checkBreakpointLocation(f, bp.line, bp.column);
-				line = location == null ? -1 : location.line;
 				if( location != null ) {
+					line = location.line;
+					if( !sourceSnapshotMatches(args.source.path, location.sourceHash) ) {
+						stale = true;
+						continue;
+					}
 					breakPos.get(f).push({line : line, column : bp.column, condition : bp.condition, logMessage : bp.logMessage});
 					bps.push({ line : line, column : location.column, endLine : location.endLine, endColumn : location.endColumn,
 						verified : true, message : null });
+					accepted = true;
 					break;
 				}
 			}
-			if( line < 0 )
-				bps.push({ line : bp.line, verified : false, message : "No code found here" });
+			if( !accepted )
+				bps.push({ line : bp.line, verified : false,
+					message : stale ? staleSourceMessage(args.source.path) : "No code found here" });
 		}
 		if( !breakOnlyActive || isSessionActive )
 			setBreakPos(true);
@@ -855,8 +885,15 @@ class HLAdapter extends DebugSession {
 			dbg.clearBreakpoints(f);
 		if( active ) {
 			for( f => bps in breakPos ) {
-				for( bp in bps )
-					var line = dbg.addBreakpoint(f, bp.line, bp.condition, bp.column);
+				for( bp in bps ) {
+					var location = dbg.checkBreakpointLocation(f, bp.line, bp.column);
+					var path = getFilePath(f);
+					if( location != null && path != null && !sourceSnapshotMatches(path, location.sourceHash) ) {
+						errorMessage(staleSourceMessage(path) + "; breakpoint was not installed.");
+						continue;
+					}
+					dbg.addBreakpoint(f, bp.line, bp.condition, bp.column);
+				}
 			}
 		}
 		if( forcePaused )
@@ -899,6 +936,7 @@ class HLAdapter extends DebugSession {
 					{ id : start + i, name : f.file, line : 0, column : 0 }
 				} else {
 					var file = getFilePath(f.file);
+					var stale = file != null && !sourceSnapshotMatches(file, f.sourceHash);
 					{
 						id : start + i,
 						name : stackStr(f),
@@ -906,6 +944,8 @@ class HLAdapter extends DebugSession {
 							name : f.file.split("/").pop(),
 							path : file == null ? js.Lib.undefined : (isWindows ? file.split("/").join("\\") : file),
 							sourceReference : file == null ? allocValue(VUnkownFile(f.file)) : 0,
+							origin : stale ? staleSourceMessage(file) : js.Lib.undefined,
+							presentationHint : stale ? cast "deemphasize" : js.Lib.undefined,
 						},
 						line : f.line,
 						column : f.column,

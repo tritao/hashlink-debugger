@@ -592,7 +592,7 @@ class Module {
 				if( seen.exists(key) ) continue;
 				seen.set(key, true);
 				locations.push({ ifun:entry.ifun, line:symbol.line, column:symbol.column,
-					endLine:symbol.endLine, endColumn:symbol.endColumn });
+					endLine:symbol.endLine, endColumn:symbol.endColumn, sourceHash:symbol.sourceHash });
 			}
 		}
 		locations.sort(function(a, b) {
