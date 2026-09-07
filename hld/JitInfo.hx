@@ -35,8 +35,8 @@ class JitInfo {
 	var codeSize : Int;
 	var allTypes : Pointer;
 
-	var functions : Array<{ start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
-	var baseFunctions : Array<{ start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
+	var functions : Array<{ stableId : Int, start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
+	var baseFunctions : Array<{ stableId : Int, start : Pointer, large : Bool, offsets : haxe.io.Bytes, ?vars : haxe.io.Bytes }>;
 	var functionByCodePos : Int64Map<Int>;
 	public var module(default,null) : Module;
 	var codeRanges : Array<{ start : Pointer, end : Pointer }> = [];
@@ -142,6 +142,8 @@ class JitInfo {
 			for( _ in 0...functionCount ) {
 				var functionIndex = input.readInt32();
 				if( functionIndex < 0 || functionIndex >= module.code.functions.length ) return false;
+				var stableId = input.readInt32();
+				if( stableId != module.getStableFunctionId(functionIndex) ) return false;
 				var fn = module.code.functions[functionIndex];
 				var nops = input.readInt32();
 				var start = regionStart.offset(input.readInt32());
@@ -151,7 +153,7 @@ class JitInfo {
 				var offsets = input.read((nops + 1) * (large ? 4 : 2));
 				var vars = input.read(varsSize);
 				if( !retired ) {
-					functions[functionIndex] = {start: start, large: large, offsets: offsets, vars: vars};
+					functions[functionIndex] = {stableId: stableId, start: start, large: large, offsets: offsets, vars: vars};
 					functionByCodePos.set(start.i64,functionIndex);
 				}
 			}
@@ -200,6 +202,8 @@ class JitInfo {
 				for( _ in 0...functionCount ) {
 					var functionIndex = input.readInt32();
 					if( functionIndex < 0 || functionIndex >= targetModule.code.functions.length ) return false;
+					var stableId = input.readInt32();
+					if( stableId != targetModule.getStableFunctionId(functionIndex) ) return false;
 					var fn = targetModule.code.functions[functionIndex];
 					var nops = input.readInt32();
 					var start = regionStart.offset(input.readInt32());
@@ -209,7 +213,7 @@ class JitInfo {
 					var offsets = input.read((nops + 1) * (large ? 4 : 2));
 					var vars = input.read(varsSize);
 					if( !retired ) {
-						next.functions[functionIndex] = { start: start, large: large, offsets: offsets, vars: vars };
+						next.functions[functionIndex] = { stableId: stableId, start: start, large: large, offsets: offsets, vars: vars };
 						next.functionByCodePos.set(start.i64, functionIndex);
 					}
 				}
@@ -233,12 +237,14 @@ class JitInfo {
 		var parsed = [];
 		for( index in 0...count ) {
 			var fn = targetModule.code.functions[index];
+			var stableId = input.readInt32();
+			if( stableId != targetModule.getStableFunctionId(index) ) return false;
 			var nops = input.readInt32();
 			var fnStart = start.offset(input.readInt32());
 			var varsSize = input.readInt32();
 			var large = input.readByte() != 0;
 			if( nops != fn.debug.length >> 1 || varsSize < 0 ) return false;
-			parsed.push({ start: fnStart, large: large, offsets: input.read((nops + 1) * (large ? 4 : 2)), vars: input.read(varsSize) });
+			parsed.push({ stableId: stableId, start: fnStart, large: large, offsets: input.read((nops + 1) * (large ? 4 : 2)), vars: input.read(varsSize) });
 		}
 		if( target != null ) {
 			target.codeStart = start;
@@ -316,6 +322,7 @@ class JitInfo {
 			var vars = hlVersion >= 2 ? input.read(varsSize) : null;
 			functionByCodePos.set(start.i64, i);
 			functions.push({
+				stableId : module.getStableFunctionId(i),
 				start : start,
 				large : large,
 				offsets : offsets,
@@ -354,6 +361,13 @@ class JitInfo {
 	}
 
 	public inline function hasFunction( fidx:Int ) return functions[fidx] != null;
+	public function findFunctionByStableId(stableId:Int):Null<Int> {
+		for( index in 0...functions.length ) {
+			var fn = functions[index];
+			if( fn != null && fn.stableId == stableId ) return index;
+		}
+		return null;
+	}
 
 	public function getFunctionPos( fidx : Int ) : Pointer {
 		return functions[fidx].start;

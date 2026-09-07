@@ -38,6 +38,7 @@ class Module {
 	var reversedHashes : Map<Int,String>;
 	var graphCache : Map<Int, CodeGraph>;
 	var methods : Array<{ obj : ObjPrototype, field : String }>;
+	var functionIdentities : Array<{ stableId : Int, name : String, displayName : String, ifun : Int, sourcePath : String, start : Int, end : Int, line : Int, flags : Int }>;
 	var functionsIndexes : Map<Int,Int>;
 	var isWindows : Bool;
 	var closureContextId : Int = 0;
@@ -49,6 +50,7 @@ class Module {
 		functionsIndexes = new Map();
 		functionRegsCache = [];
 		methods = [];
+		functionIdentities = [];
 		isWindows = Sys.systemName() == "Windows";
 	}
 
@@ -58,20 +60,44 @@ class Module {
 		return methods[f.findex];
 	}
 
-	public function getNamedFunctions() : Array<{ name : String, field : String, ifun : Int }> {
+	public function getNamedFunctions() : Array<{ stableId : Int, name : String, field : String, ifun : Int }> {
 		var result = [];
+		var explicit = new Map<Int,Bool>();
+		for( identity in functionIdentities ) {
+			result.push({ stableId : identity.stableId, name : identity.name, field : identity.displayName, ifun : identity.ifun });
+			explicit.set(identity.ifun, true);
+		}
 		for( ifun in 0...code.functions.length ) {
+			if( explicit.exists(ifun) ) continue;
 			var context = getMethodContext(ifun);
 			if( context == null ) continue;
 			var objectName = context.obj.name.split("$").join("");
 			var field = context.field == "__constructor__" ? "new" : context.field;
-			result.push({ name : objectName + "." + field, field : field, ifun : ifun });
+			result.push({ stableId : code.functions[ifun].findex, name : objectName + "." + field, field : field, ifun : ifun });
 		}
 		return result;
 	}
 
+	public function getStableFunctionId(ifun:Int):Int {
+		for( identity in functionIdentities ) if( identity.ifun == ifun ) return identity.stableId;
+		return code.functions[ifun].findex;
+	}
+
+	public function getFunctionDebugName(ifun:Int):Null<String> {
+		for( identity in functionIdentities ) if( identity.ifun == ifun ) return identity.name;
+		return null;
+	}
+
 	public function load( data : haxe.io.Bytes ) {
-		code = new format.hl.Reader().read(new haxe.io.BytesInput(data));
+		var version = data.length > 3 ? data.get(3) : 0;
+		var readerBytes = data;
+		if( version == 7 ) {
+			readerBytes = data.sub(0, data.length);
+			readerBytes.set(3, 6); // format 3.x does not yet know that v7 only appends sections.
+		}
+		var input = new haxe.io.BytesInput(readerBytes);
+		input.bigEndian = false;
+		code = new format.hl.Reader().read(input);
 
 		if( code.debugFiles == null )
 			throw "Debug info not available in the bytecode";
@@ -126,6 +152,71 @@ class Module {
 		}
 		for( i in 0...code.natives.length )
 			functionsIndexes.set(code.natives[i].findex, code.functions.length + i);
+		if( version == 7 ) readDebugSections(data, input.position);
+	}
+
+	function readDebugSections(data:haxe.io.Bytes, position:Int) {
+		var input = new haxe.io.BytesInput(data);
+		input.position = position;
+		input.bigEndian = false;
+		var count = readUnsignedIndex(input);
+		for( _ in 0...count ) {
+			var kind = readUnsignedIndex(input);
+			var version = readUnsignedIndex(input);
+			var flags = readUnsignedIndex(input);
+			var length = readUnsignedIndex(input);
+			if( kind <= 0 || version <= 0 || length > data.length - input.position ) throw "Invalid HLB debug section";
+			var payload = input.read(length);
+			if( kind == 1 && version == 1 ) readFunctionIdentities(payload);
+		}
+		if( input.position != data.length ) throw "Trailing data after HLB debug sections";
+	}
+
+	function readFunctionIdentities(bytes:haxe.io.Bytes) {
+		var input = new haxe.io.BytesInput(bytes);
+		var count = readUnsignedIndex(input);
+		var stableIds = new Map<Int,Bool>();
+		var functionIds = new Map<Int,Bool>();
+		for( _ in 0...count ) {
+			var stableId = readUnsignedIndex(input);
+			var functionIndex = readUnsignedIndex(input);
+			var name = readSizedString(input);
+			var displayName = readSizedString(input);
+			var sourcePath = readSizedString(input);
+			var start = readIndex(input) - 1;
+			var end = readIndex(input) - 1;
+			var line = readUnsignedIndex(input);
+			var flags = readUnsignedIndex(input);
+			var ifun = functionsIndexes.get(functionIndex);
+			if( ifun == null || ifun >= code.functions.length || name == "" || displayName == "" || stableIds.exists(stableId) || functionIds.exists(functionIndex) )
+				throw "Invalid HLB function identity";
+			stableIds.set(stableId, true);
+			functionIds.set(functionIndex, true);
+			functionIdentities.push({stableId:stableId, name:name, displayName:displayName, ifun:ifun, sourcePath:sourcePath, start:start, end:end, line:line, flags:flags});
+		}
+		if( input.position != input.length ) throw "Trailing data in HLB function identities";
+	}
+
+	static function readSizedString(input:haxe.io.BytesInput) {
+		var length = readUnsignedIndex(input);
+		return input.readString(length);
+	}
+
+	static function readUnsignedIndex(input:haxe.io.BytesInput) {
+		var value = readIndex(input);
+		if( value < 0 ) throw "Negative HLB unsigned index";
+		return value;
+	}
+
+	static function readIndex(input:haxe.io.BytesInput) {
+		var b = input.readByte();
+		if( b & 0x80 == 0 ) return b & 0x7F;
+		if( b & 0x40 == 0 ) {
+			var value = input.readByte() | ((b & 31) << 8);
+			return b & 0x20 == 0 ? value : -value;
+		}
+		var value = ((b & 31) << 24) | (input.readByte() << 16) | (input.readByte() << 8) | input.readByte();
+		return b & 0x20 == 0 ? value : -value;
 	}
 
 	function fetchField( o : ObjPrototype, fid : Int ) {

@@ -47,6 +47,7 @@ class StackInfo {
 	var line : Int;
 	var ebp : Pointer;
 	var context : Null<{ obj : format.hl.Data.ObjPrototype, field : String }>;
+	@:optional var functionName : String;
 }
 
 class Debugger {
@@ -82,10 +83,10 @@ class Debugger {
 	var debugProtocolStarted = false;
 	var mappingRequestPending = false;
 	var revisionNotificationPending = false;
-	var pendingRebinds : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module }>;
+	var pendingRebinds : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module, ?stableId : Int }>;
 	var ignoredRoots : Map<String,Bool>;
 
-	var breakPoints : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module, ?functionBreakpoint : Bool }>;
+	var breakPoints : Array<{ fid : Int, pos : Int, codePos : Pointer, oldByte : Int, condition : String, ?jit : JitInfo, ?module : Module, ?stableId : Int, ?functionBreakpoint : Bool }>;
 	var nextStep(default,set): Pointer = Pointer.make(0,0);
 	var currentStack : Array<StackRawInfo>;
 	var watches : Array<WatchPoint>;
@@ -329,7 +330,10 @@ class Debugger {
 			if( bp.fid < 0 ) continue;
 			var owner = bp.jit == null ? jit : bp.jit;
 			var current = owner.moduleIdentity == null ? owner : findJitModule(owner.moduleIdentity);
-			if( current == null || !current.hasFunction(bp.fid) ) continue;
+			if( current == null ) continue;
+			var rebound = bp.stableId == null ? bp.fid : current.findFunctionByStableId(bp.stableId);
+			if( rebound == null || !current.hasFunction(rebound) ) continue;
+			bp.fid = rebound;
 			var next = current.getCodePos(bp.fid, bp.pos);
 			if( next == bp.codePos ) continue;
 			bp.jit = current;
@@ -363,7 +367,10 @@ class Debugger {
 			if( bp.fid < 0 ) continue;
 			var owner = bp.jit == null ? jit : bp.jit;
 			var current = owner.moduleIdentity == null ? owner : findJitModule(owner.moduleIdentity);
-			if( current == null || current.getFunctionVars(bp.fid) == null ) continue;
+			if( current == null ) continue;
+			var rebound = bp.stableId == null ? bp.fid : current.findFunctionByStableId(bp.stableId);
+			if( rebound == null || current.getFunctionVars(rebound) == null ) continue;
+			bp.fid = rebound;
 			var next = current.getCodePos(bp.fid, bp.pos);
 			if( next == bp.codePos ) continue;
 			// Old regions may already have been retired; only install the new trap.
@@ -1158,10 +1165,10 @@ class Debugger {
 
 	function stackInfo( f ) : StackInfo {
 		if( f.fidx == Eval.TRAMPOLINE_FIDX )
-			return { file : "<native>", line : 0, ebp : f.ebp, context : null };
+			return { file : "<native>", line : 0, ebp : f.ebp, context : null, functionName : null };
 		var owner : Module = f.module == null ? module : f.module;
 		var s = owner.resolveSymbol(f.fidx, f.fpos);
-		return { file : s.file, line : s.line, ebp : f.ebp, context : owner.getMethodContext(f.fidx) };
+		return { file : s.file, line : s.line, ebp : f.ebp, context : owner.getMethodContext(f.fidx), functionName : owner.getFunctionDebugName(f.fidx) };
 	}
 
 	function setContext(global:Bool) {
@@ -1373,7 +1380,7 @@ class Debugger {
 				var codePos = owner.getCodePos(b.ifun, b.pos);
 				var old = getAsm(codePos);
 				setAsm(codePos, INT3);
-				breakPoints.push({ fid : b.ifun, pos : b.pos, oldByte : old, codePos : codePos, condition : condition, jit : owner, module : owner.module });
+				breakPoints.push({ fid : b.ifun, pos : b.pos, oldByte : old, codePos : codePos, condition : condition, jit : owner, module : owner.module, stableId : owner.module.getStableFunctionId(b.ifun) });
 				DebugTrace.write("debugger", "breakpoint_installed", { file : file, line : breaks.line, functionId : b.ifun, opcode : b.pos, address : codePos.toString(), oldByte : old });
 				installed = true;
 			}
@@ -1411,7 +1418,7 @@ class Debugger {
 			}
 			var old = getAsm(codePos);
 			setAsm(codePos, INT3);
-			breakPoints.push({ fid : candidate.ifun, pos : 0, oldByte : old, codePos : codePos, condition : condition, jit : owner, module : owner.module, functionBreakpoint : true });
+			breakPoints.push({ fid : candidate.ifun, pos : 0, oldByte : old, codePos : codePos, condition : condition, jit : owner, module : owner.module, stableId : candidate.stableId, functionBreakpoint : true });
 			DebugTrace.write("debugger", "function_breakpoint_installed", { name : candidate.name, functionId : candidate.ifun, address : codePos.toString(), oldByte : old });
 			installed = true;
 		}

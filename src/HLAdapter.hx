@@ -531,7 +531,7 @@ class HLAdapter extends DebugSession {
 				field = "new";
 			return clName.join(".") + "." + field;
 		}
-		return "<local function>";
+		return f.functionName == null ? "<local function>" : f.functionName;
 	}
 
 	function run() {
