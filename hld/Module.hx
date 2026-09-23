@@ -142,12 +142,7 @@ class Module {
 
 	public function load( data : haxe.io.Bytes ) {
 		var version = data.length > 3 ? data.get(3) : 0;
-		var readerBytes = data;
-		if( version == 7 ) {
-			readerBytes = data.sub(0, data.length);
-			readerBytes.set(3, 6); // format 3.x does not yet know that v7 only appends sections.
-		}
-		var input = new haxe.io.BytesInput(readerBytes);
+		var input = new haxe.io.BytesInput(data);
 		input.bigEndian = false;
 		code = new format.hl.Reader().read(input);
 
