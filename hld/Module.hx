@@ -199,7 +199,7 @@ class Module {
 		}
 		for( i in 0...code.natives.length )
 			functionsIndexes.set(code.natives[i].findex, code.functions.length + i);
-		if( version == 7 ) readDebugSections(data, input.position);
+		if( version >= 7 ) readDebugSections(data, input.position);
 	}
 
 	function readDebugSections(data:haxe.io.Bytes, position:Int) {
@@ -216,12 +216,59 @@ class Module {
 			var key = kind + ":" + version;
 			if( kind <= 0 || version <= 0 || length > data.length - input.position || seen.exists(key) ) throw "Invalid HLB debug section";
 			seen.set(key, true);
-			sections.push({kind:kind, version:version, payload:input.read(length)});
+			var payload = input.read(length);
+			if( flags & 1 != 0 ) {
+				var compressed = new haxe.io.BytesInput(payload);
+				var size = readUnsignedIndex(compressed);
+				payload = decompressDebugSection(payload, compressed.position, size);
+			}
+			sections.push({kind:kind, version:version, payload:payload});
 		}
 		if( input.position != data.length ) throw "Trailing data after HLB debug sections";
 		for( section in sections ) if( section.kind == 1 && section.version == 1 ) readFunctionIdentities(section.payload);
 		for( section in sections ) if( section.kind == 2 && section.version == 2 ) readOpcodeSourceSpans(section.payload);
 		for( section in sections ) if( section.kind == 3 && section.version == 1 ) readSourceSnapshots(section.payload);
+	}
+
+	static function decompressDebugSection(bytes:haxe.io.Bytes, position:Int, size:Int):haxe.io.Bytes {
+		var output = haxe.io.Bytes.alloc(size), at = position, end = bytes.length, written = 0;
+		function byte():Int {
+			if( at >= end )
+				throw "Truncated LZ4 block";
+			return bytes.get(at++);
+		}
+		function extended(count:Int):Int {
+			if( count == 15 ) {
+				var next = 255;
+				while( next == 255 ) {
+					next = byte();
+					count += next;
+				}
+			}
+			return count;
+		}
+		while( true ) {
+			var token = byte(), literals = extended(token >>> 4);
+			if( literals > end - at || literals > size - written )
+				throw "Invalid LZ4 literals";
+			output.blit(written, bytes, at, literals);
+			at += literals;
+			written += literals;
+			if( at == end )
+				break;
+			var offset = byte() | (byte() << 8), match = extended(token & 15) + 4;
+			if( offset == 0 || offset > written || match > size - written )
+				throw "Invalid LZ4 match";
+			if( offset >= match )
+				output.blit(written, output, written - offset, match);
+			else
+				for( index in 0...match )
+					output.set(written + index, output.get(written - offset + index));
+			written += match;
+		}
+		if( written != size )
+			throw "LZ4 block does not decode to its size";
+		return output;
 	}
 
 	function readSourceSnapshots(bytes:haxe.io.Bytes) {

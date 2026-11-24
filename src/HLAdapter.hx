@@ -35,6 +35,7 @@ typedef SourceBreakpoint = {
 	var logMessage : Null<String>;
 }
 
+@:expose("HLAdapter")
 class HLAdapter extends DebugSession {
 
 	static var UID = 0;
@@ -157,7 +158,7 @@ class HLAdapter extends DebugSession {
 
 	override function breakpointLocationsRequest(response:BreakpointLocationsResponse, args:BreakpointLocationsArguments):Void {
 		var locations:Array<BreakpointLocation> = [];
-		if( args.source.path != null && sys.FileSystem.exists(args.source.path) )
+		if( dbg != null && args.source.path != null && sys.FileSystem.exists(args.source.path) )
 			for( file in getLocalFiles(args.source.path) )
 				for( location in dbg.getBreakpointLocations(file, args.line, args.column, args.endLine, args.endColumn) )
 					if( sourceSnapshotMatches(args.source.path, location.sourceHash)
@@ -235,8 +236,9 @@ class HLAdapter extends DebugSession {
 					moduleEventsReady = true;
 					publishModuleEvents();
 					sendResponse(response);
-				});
-			}
+				}, args.commandArguments != null);
+			} else
+				sendResponse(response);
 		} catch( e : Dynamic ) {
 			onError(e);
 		}
@@ -382,8 +384,7 @@ class HLAdapter extends DebugSession {
 		sendEvent(e);
 	}
 
-	function launch( args : Arguments, response : LaunchResponse ) {
-
+	function defaultCommandArguments(args:Arguments):Array<String> {
 		var port = args.port == null ? debugPort : args.port;
 		var hlArgs = ["--debug", "" + port, args.program];
 
@@ -425,6 +426,13 @@ class HLAdapter extends DebugSession {
 				hlArgs.push(w);
 			}
 		}
+		return hlArgs;
+	}
+
+	function launch( args : Arguments, response : LaunchResponse ) {
+		var port = args.port == null ? debugPort : args.port;
+		var hlArgs = args.commandArguments == null ? defaultCommandArguments(args) : args.commandArguments;
+
 		// ALLUSERSPROFILE required to spawn correctly on Windows, see vshaxe/hashlink-debugger#51.
 		var hlPath = (args.hl != null) ? args.hl : 'hl';
 		if(args.hl != null && js.Node.process.env.get('LIBHL_PATH') == null) {
@@ -450,6 +458,7 @@ class HLAdapter extends DebugSession {
 				var cur = prev;
 				var t = new haxe.Timer(200);
 				t.run = function() {
+					t.stop();
 					if( prev == cur ) {
 						sendEvent(new OutputEvent(prev, Stdout));
 						prev = "";
@@ -488,7 +497,7 @@ class HLAdapter extends DebugSession {
 	}
 
 
-	function startDebug( program : String, port : Int, onError : String -> Void ) {
+	function startDebug( program : String, port : Int, onError : String -> Void, matchProcess = false ) {
 		dbg = new hld.Debugger();
 		dbg.onDebugMappingsChanged = function() {
 			var hadWatches = activeDataBreakpoints.length > 0;
@@ -527,7 +536,13 @@ class HLAdapter extends DebugSession {
 				return;
 			}
 
+			if( dbg == null ) return;
 			var pid = @:privateAccess dbg.jit.pid;
+			if( matchProcess && proc != null && pid != proc.pid ) {
+				@:privateAccess dbg.close();
+				onError("The debug port belongs to a different process");
+				return;
+			}
 			if( pid == 0 ) {
 				if( proc == null ) {
 					onError("Process attach requires HL 1.7+");
@@ -1329,7 +1344,7 @@ class HLAdapter extends DebugSession {
 		debug("Disconnect request");
 		if( proc != null ) proc.kill();
 		sendResponse(response);
-		if( dbg.stoppedThread != null ) {
+		if( dbg != null && dbg.stoppedThread != null ) {
 			var ev = new ContinuedEvent(dbg.stoppedThread, true);
 			sendEvent(ev);
 		}
@@ -1700,6 +1715,7 @@ class HLAdapter extends DebugSession {
 	// Standalone adapter.js
 
 	static function main() {
+		#if !project_adapter
 		function paramError( msg ) {
 			Sys.stderr().writeString(msg + "\n");
 			// Sys.exit(1); // Ignore error
@@ -1735,6 +1751,7 @@ class HLAdapter extends DebugSession {
 			});
 		}
 		DebugSession.run( HLAdapter );
+		#end
 	}
 
 }

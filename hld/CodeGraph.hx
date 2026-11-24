@@ -430,9 +430,9 @@ class CodeGraph {
 			CThrow;
 		case OSwitch(_,cases,_):
 			CSwitch(cases);
-		case OTrap(_,d):
+		case OCleanupTrap(_,d), OTrap(_,d):
 			CTry(d);
-		case OEndTrap(_):
+		case OEndCleanupTrap(_), OEndTrap(_):
 			CCatch;
 		case OCallClosure(_), OCallMethod(_), OCallThis(_):
 			CCall(-1);
@@ -493,9 +493,9 @@ class CodeGraph {
 			read(a); write(d);
 		case ORet(r), OThrow(r), ORethrow(r), OSwitch(r,_,_), ONullCheck(r):
 			read(r);
-		case OTrap(r,_):
+		case OCleanupTrap(r,_), OTrap(r,_):
 			write(r);
-		case OEndTrap(_):
+		case OEndCleanupTrap(_), OEndTrap(_):
 			// nothing
 		case OGetUI8(d,a,b), OGetUI16(d,a,b), OGetMem(d,a,b), OGetArray(d,a,b):
 			read(a); read(b); write(d);

@@ -2,6 +2,7 @@ typedef Arguments = {
 	cwd:String,
 	classPaths:Array<String>,
 	?hl:String,
+	?commandArguments:Array<String>,
 	?env:haxe.DynamicAccess<String>,
 	?program:String,
 	?args:Array<String>,

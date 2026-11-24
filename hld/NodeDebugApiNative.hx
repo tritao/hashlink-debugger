@@ -1,7 +1,11 @@
 package hld;
 import hld.Api;
 
+#if project_adapter
+@:jsRequire("./native")
+#else
 @:jsRequire("hldebug")
+#end
 extern class Native {
 	static function echo( n : String, len : Int ) : String;
 	static function debugStart( pid : Int ) : Bool;
