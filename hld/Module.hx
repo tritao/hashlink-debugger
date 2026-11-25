@@ -141,6 +141,8 @@ class Module {
 	}
 
 	public function load( data : haxe.io.Bytes ) {
+		if( compiler.hl.HlStaticLink.isSectioned(data) )
+			data = compiler.hl.HlStaticLink.link(data);
 		var version = data.length > 3 ? data.get(3) : 0;
 		var input = new haxe.io.BytesInput(data);
 		input.bigEndian = false;

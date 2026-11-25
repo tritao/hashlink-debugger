@@ -2,6 +2,7 @@
 -cp ../format
 -lib hscript
 -cp src
+-cp ../../src
 -D js-es=6
 -js adapter.js
 -main HLAdapter

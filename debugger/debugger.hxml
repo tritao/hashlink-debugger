@@ -1,5 +1,6 @@
 -lib format
 -lib hscript
 -cp ..
+-cp ../../../src
 -hl debug.hl
 -main hld.Main

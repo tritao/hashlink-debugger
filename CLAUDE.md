@@ -26,6 +26,10 @@ invalidates one must update it rather than work around it.
   that socket lives in the HashLink sources.
 - Debug info (line numbers, variable names, register mapping) is embedded in the `.hl` file
   **by the Haxe compiler**.
+- A `.hl` file of per-module sections (HLB 9) is read as the dense module the VM links it into when it loads it:
+  `Module.load` links it first with the Haxeon compiler's `compiler.hl.HlStaticLink`, which needs nothing but `haxe`.
+  The hxml files put the compiler's `src` on the class path, beside the vendored `format`, so they build from the
+  Haxeon checkout this repository is vendored in.
 
 VM and compiler internals are deliberately **not** documented here: they move independently of this
 repo, and a stale description is worse than none. Where the debugger depends on something the VM

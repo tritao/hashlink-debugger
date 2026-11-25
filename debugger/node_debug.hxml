@@ -1,6 +1,7 @@
 -js debugger.js
 -main hld.Main
 -cp ..
+-cp ../../../src
 -lib format
 -lib hscript
 -lib hxnodejs
